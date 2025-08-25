@@ -11,17 +11,9 @@ import sounddevice as sd
 from collections import deque
 import time
 import soundfile as sf
-import uuid
-import threading
-
-# 전역(Globals & Flags 섹션) 어딘가에 추가
-REC_THREAD = None
-REC_DONE = False
 
 import ssl
-
 ssl._create_default_https_context = ssl._create_unverified_context
-
 
 # =========================
 # VAD Recorder
@@ -41,7 +33,7 @@ class VADRecorder:
         # Settings
         self.SAMPLE_RATE = 16000
         self.BUFFER_SIZE = self.SAMPLE_RATE * 60  # 1 minute buffer
-        self.THRESHOLD = 0.5  # TODO: fit to environment
+        self.THRESHOLD = 0.65
         self.MIN_DURATION = 0.5
         self.MARGIN = 1
         self.SILENCE_TIME = 0.6
@@ -156,7 +148,6 @@ ENROLL_SUCCESS = False
 VAD = False
 BYE_EXIST = False
 TIMER_EXPIRED = False  # WELCOME, BYE state's timer
-ASR_TEXT = ""
 
 # Shared between states
 sh_face_crop = None
@@ -175,30 +166,6 @@ sh_prev_unkonw = None
 
 DB_PATH = "faces_db.npy"
 SIM_THRESHOLD = 0.65
-
-
-def _record_worker(timeout: int):
-    """
-    WELCOME 단계에서 비동기로 한 번만 녹음.
-    완료되면 sh_audio_file, VAD, REC_DONE 갱신.
-    """
-    global sh_audio_file, VAD, REC_DONE
-    filename = listen_and_record_speech(timeout=timeout)  # 내부에서 VADRecorder 실행
-    sh_audio_file = filename
-    VAD = bool(filename)
-    REC_DONE = True
-
-
-def _asr_worker(path: str):
-    """
-    ASR를 백그라운드에서 실행하고 결과를 플래그에 기록.
-    """
-    global ASR_TEXT, BYE_EXIST, ASR_DONE
-    txt = asr_from_wav(path) if path else ""
-    ASR_TEXT = txt or ""
-    t = "".join(ASR_TEXT.split())
-    BYE_EXIST = ("잘가" in t) or ("bye" in t.lower())
-    ASR_DONE = True
 
 
 def load_db():
@@ -256,7 +223,6 @@ def update_face_detection():
 # =========================
 
 import whisper
-
 whisper_model = whisper.load_model("large-v3")
 
 
@@ -310,8 +276,8 @@ def enter_user_check():
 
 
 def enter_enroll(key=None):
-    # key kept for signature compatibility; not used
-    global ENROLL_SUCCESS, sh_message, sh_color
+    # key kept for compatibility; do not reset ENROLL_SUCCESS here!
+    global sh_message, sh_color
 
     results = update_face_detection()
 
@@ -320,56 +286,41 @@ def enter_enroll(key=None):
             sh_message = f"{len(results.detections)} faces detected. Only one please."
             sh_color = (0, 0, 255)
         else:
-            sh_message = "Please show your face to the camera for enrollment."
+            sh_message = "등록을 위해 얼굴을 카메라에 비춰주세요."
             sh_color = (255, 255, 0)
     else:
-        sh_message = "Unknown user. Use the right panel to enroll."
+        sh_message = "알 수 없는 사용자입니다. 오른쪽 패널의 폼으로 등록하세요."
         sh_color = (0, 255, 255)
 
 
 def enter_welcome():
-    global VAD, TIMER_EXPIRED, sh_message, sh_color, REC_THREAD, REC_DONE
+    global VAD, sh_audio_file, TIMER_EXPIRED, sh_message, sh_color
 
-    update_face_detection()  # 카메라는 계속 읽고 있어도 됨
+    update_face_detection()
 
+    TIMER_EXPIRED = False
+    VAD = False
     sh_message = f"Hi, {sh_current_user}!"
     sh_color = (0, 255, 0)
 
-    # 인사 타이머가 끝나면 녹음을 시작(단, 한 번만)
     if time.time() > sh_timer_end:
         TIMER_EXPIRED = True
-
-        # 녹음 스레드가 아직 없고, 완료도 안됐으면 시작
-        if (REC_THREAD is None or not REC_THREAD.is_alive()) and not REC_DONE:
-            REC_THREAD = threading.Thread(target=_record_worker, args=(5,), daemon=True)
-            REC_THREAD.start()
-
-        # UI 메시지: 녹음 중 안내 (루프 매 프레임 갱신)
-        if not REC_DONE:
-            sh_message = f"Listening... (up to 5s)"
-        else:
-            # 녹음 완료됨: 메시지만 바꿔두고, 전이는 state_transition에서 처리
-            sh_message = "Audio captured!" if VAD else "No speech detected."
+        sh_audio_file = listen_and_record_speech(timeout=5)
+        if sh_audio_file:
+            VAD = True
 
 
 def enter_asr():
-    global ASR_THREAD, ASR_DONE, sh_message, sh_color
+    global BYE_EXIST
 
-    # 카메라/얼굴 검출은 계속 돈다 (UI 오버레이를 위해 필요)
     update_face_detection()
 
-    # 최초 진입 시 스레드 시작
-    if (ASR_THREAD is None or not ASR_THREAD.is_alive()) and not ASR_DONE and sh_audio_file:
-        ASR_THREAD = threading.Thread(target=_asr_worker, args=(sh_audio_file,), daemon=True)
-        ASR_THREAD.start()
-
-    # UI 메시지
-    if not ASR_DONE:
-        sh_message = "Transcribing..."
-        sh_color = (0, 255, 255)
+    text = asr_from_wav(sh_audio_file)
+    text = "".join(text.split())
+    if "잘가" in text or "bye" in text.lower():
+        BYE_EXIST = True
     else:
-        sh_message = "ASR done"
-        sh_color = (0, 200, 0)
+        BYE_EXIST = False
 
 
 def enter_bye():
@@ -399,7 +350,7 @@ def state_transition(current_state: State) -> State:
         return State.WELCOME if USER_EXIST else State.ENROLL
 
     elif current_state == State.ENROLL:
-        # Stay in ENROLL until success; go IDLE only if face lost
+        # ENROLL 성공 시 WELCOME
         if ENROLL_SUCCESS:
             print("[Enroll Success] Reloading DB...")
             name_list, group_list, embeddings = load_db()
@@ -408,14 +359,12 @@ def state_transition(current_state: State) -> State:
         return State.IDLE if not FACE_DETECTED else State.ENROLL
 
     elif current_state == State.WELCOME:
-        if TIMER_EXPIRED and REC_DONE:
+        if TIMER_EXPIRED:
             return State.ASR if VAD else State.IDLE
         return State.WELCOME
 
     elif current_state == State.ASR:
-        if ASR_DONE:
-            return State.BYE if BYE_EXIST else State.IDLE
-        return State.ASR
+        return State.BYE if BYE_EXIST else State.IDLE
 
     elif current_state == State.BYE:
         return State.IDLE if TIMER_EXPIRED else State.BYE
@@ -489,28 +438,26 @@ with col_ui:
 if "cap" not in st.session_state:
     st.session_state.cap = None
 
-if "enroll_form_key" not in st.session_state:
-    st.session_state.enroll_form_key = None
-
-
 def open_camera(index: int, target_w: int):
     cap = cv2.VideoCapture(index)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, target_w)
     return cap
 
-
-# ENROLL UI lifecycle flags
+# ENROLL UI lifecycle flags & unique keys
 ENROLL_UI_BUILT = False
 enroll_face_ph = None
+enroll_form_counter = 0
+current_enroll_form_key = None
+current_enroll_name_key = None
+current_enroll_group_key = None
 
 # Initial state
 state = State.IDLE
 st.caption("Starting state machine...")
 
-
-# ENROLL submit helper (uses Streamlit; defined after importing st)
+# ENROLL submit helper
 def ui_enroll_submit(new_name: str, new_group: str):
-    global ENROLL_SUCCESS, name_list, group_list, embeddings, sh_current_user
+    global ENROLL_SUCCESS, USER_EXIST, name_list, group_list, embeddings, sh_current_user
 
     if not new_name or new_name.strip() == "":
         st.warning("이름은 필수입니다.")
@@ -548,19 +495,17 @@ if run:
             st.error("카메라를 열 수 없습니다. 인덱스를 바꾸거나 다른 앱을 종료해보세요.")
             st.stop()
 
-
     # UI helper: render state panel
     def render_state_panel(current_state: State):
         global ENROLL_UI_BUILT, enroll_face_ph
+        global current_enroll_form_key, current_enroll_name_key, current_enroll_group_key
 
         # Badge
         state_badge.markdown(f"**Current State:** :blue[{current_state.name}]")
 
-        # --- 중요: 현재 상태가 ENROLL일 때는 enroll_slot을 비우지 않는다!
+        # ENROLL 외 상태 슬롯 정리
         if current_state != State.ENROLL:
-            enroll_slot.empty()  # ENROLL을 벗어나는 순간에만 비움
-
-        # 다른 상태 슬롯들은 매 프레임 초기화 가능
+            enroll_slot.empty()
         if current_state != State.WELCOME:
             welcome_slot.empty()
         if current_state != State.ASR:
@@ -572,48 +517,34 @@ if run:
         with message_slot.container():
             st.markdown(f"**Message:** {sh_message}")
 
-        # ENROLL UI (form created once, with unique key)
+        # ENROLL UI (form created once per entry)
         if current_state == State.ENROLL:
-            # ENROLL에 들어올 때마다 고유한 폼 키를 1회 생성
-            if st.session_state.enroll_form_key is None:
-                st.session_state.enroll_form_key = f"form_enroll_{uuid.uuid4().hex}"
-                # 폼이 새로 만들어질 것이므로, 표시용 face placeholder도 새로 받음
-                ENROLL_UI_BUILT = False
-                enroll_face_ph = None
-
             if not ENROLL_UI_BUILT:
                 ENROLL_UI_BUILT = True
                 with enroll_slot.container():
                     st.info("알 수 없는 사용자입니다. 아래 폼으로 등록을 진행하세요.")
                     enroll_face_ph = st.empty()
 
-                    form_key = st.session_state.enroll_form_key
-                    # 입력 위젯 키도 폼 키에 종속시켜 중복 방지
-                    with st.form(key=form_key, clear_on_submit=False):
-                        new_name = st.text_input("이름", key=f"{form_key}_name")
-                        new_group = st.text_input("그룹(선택)", key=f"{form_key}_group")
+                    # 고유 키 사용
+                    with st.form(key=current_enroll_form_key, clear_on_submit=False):
+                        new_name = st.text_input("이름", key=current_enroll_name_key)
+                        new_group = st.text_input("그룹(선택)", key=current_enroll_group_key)
                         submitted = st.form_submit_button("등록하기", use_container_width=True)
                     if submitted:
                         ui_enroll_submit(new_name, new_group)
-                        # 등록 직후에는 바로 전이되므로(UI상) 폼 키 정리(안전)
-                        st.session_state.enroll_form_key = None
 
-            # 얼굴 미리보기는 계속 갱신
+            # 얼굴 미리보기 갱신
             if enroll_face_ph is not None:
                 if sh_face_crop is not None and sh_face_crop.size != 0:
                     face_rgb = cv2.cvtColor(sh_face_crop, cv2.COLOR_BGR2RGB)
                     enroll_face_ph.image(face_rgb, caption="등록할 얼굴", use_container_width=True)
                 else:
                     enroll_face_ph.warning("얼굴이 감지되지 않았습니다. 카메라를 향해 한 명만 비춰주세요.")
-
         else:
-            # ENROLL이 아니면 폼 리소스 정리 (다음 ENROLL 때 새 키/폼 생성)
+            # Leaving ENROLL -> flag reset (폼은 숨겨져 있지만 같은 run 내 재생성 방지용으로 키를 바꿔서 다음 진입 시 새 폼 생성)
             if ENROLL_UI_BUILT:
                 ENROLL_UI_BUILT = False
                 enroll_face_ph = None
-            enroll_slot.empty()
-            # 혹시 남아있는 폼 키가 있으면 제거
-            st.session_state.enroll_form_key = None
 
         # WELCOME UI
         if current_state == State.WELCOME:
@@ -626,15 +557,11 @@ if run:
         # ASR UI
         if current_state == State.ASR:
             with asr_slot.container():
-                if not ASR_DONE:
-                    st.info("Transcribing...")  # 진행중
-                else:
-                    st.success("ASR Completed")
-                    if ASR_TEXT:
-                        st.write(ASR_TEXT)
-                    st.write(f"**BYE detected:** {'Yes' if BYE_EXIST else 'No'}")
+                st.info("음성 인식 결과")
                 if sh_audio_file:
                     audio_slot.audio(sh_audio_file)
+                    st.write("녹음 파일 재생 가능")
+                st.write(f"**BYE detected:** {'Yes' if BYE_EXIST else 'No'}")
 
         # BYE UI
         if current_state == State.BYE:
@@ -643,7 +570,6 @@ if run:
                 remain = max(0.0, sh_timer_end - time.time())
                 pct = min(max(1.0 - (remain / 2.0), 0.0), 1.0)
                 st.progress(pct, text="Ending...")
-
 
     # Main loop
     while run:
@@ -656,44 +582,33 @@ if run:
         key = cv2.waitKey(1) & 0xFF
 
         # Call & transition
+        previous_state = state
         call_state_fn(state, key)
         new_state = state_transition(state)
 
         if new_state != state:
             print(f"State Change: {state.name} -> {new_state.name}")
 
-            # ENROLL '진입' 시 한 번만 초기화
-            if new_state == State.ENROLL:
+            # ENROLL에 '진입'할 때만 초기화 및 고유 키 생성
+            if new_state == State.ENROLL and previous_state != State.ENROLL:
                 ENROLL_SUCCESS = False
                 USER_EXIST = False
-                # 이전 폼 키가 남아있으면 지움 (안전)
-                st.session_state.enroll_form_key = None
-
-            # ENROLL '이탈' 시 폼 키 제거 (중복 방지)
-            if state == State.ENROLL and new_state != State.ENROLL:
-                st.session_state.enroll_form_key = None
-
-            if new_state == State.WELCOME:
-                sh_timer_end = time.time() + 2.0  # 2초 인사
-                VAD = False
-                REC_DONE = False
-                REC_THREAD = None
-
-            if new_state == State.ASR:
-                ASR_DONE = False
-                BYE_EXIST = False
-                ASR_THREAD = None
-                ASR_TEXT = ""
-
-            if new_state == State.BYE:
-                sh_timer_end = time.time() + 2.0
+                ENROLL_UI_BUILT = False  # 새 ENROLL 세션에서 폼 1회 생성하도록
+                enroll_form_counter += 1
+                current_enroll_form_key = f"form_enroll_{enroll_form_counter}"
+                current_enroll_name_key = f"enroll_name_{enroll_form_counter}"
+                current_enroll_group_key = f"enroll_group_{enroll_form_counter}"
 
             state = new_state
+            if state == State.WELCOME:
+                sh_timer_end = time.time() + 2.0  # greeting 2s
+            elif state == State.BYE:
+                sh_timer_end = time.time() + 2.0  # bye 2s
 
         # Update state panel
         render_state_panel(state)
 
-        # ── 영상 그리기/표시 (항상 표시: ASR 포함)
+        # Draw overlays
         display_frame = sh_frame.copy()
 
         if sh_bbox:
@@ -705,6 +620,7 @@ if run:
             cv2.putText(display_frame, sh_message, (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, sh_color, 2)
 
+        # Show frame
         frame_rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
         h0, w0, _ = frame_rgb.shape
         new_h = int(h0 * (width / w0))
