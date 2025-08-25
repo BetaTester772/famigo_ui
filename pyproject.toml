@@ -13,6 +13,7 @@ dependencies = [
     "pillow>=11.3.0",
     "sounddevice>=0.5.2",
     "soundfile>=0.13.1",
+    "sqlalchemy>=2.0.43",
     "streamlit>=1.48.1",
     "streamlit-webrtc>=0.63.4",
     "torch>=2.8.0",
