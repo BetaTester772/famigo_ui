@@ -4,8 +4,6 @@ from facenet_pytorch import InceptionResnetV1
 from PIL import Image
 import torchvision.transforms as transforms
 import os
-import tkinter as tk
-from tkinter import simpledialog
 from enum import Enum
 import torch
 import numpy as np
@@ -14,6 +12,10 @@ from collections import deque
 import time
 import soundfile as sf
 
+
+# =========================
+# VAD Recorder
+# =========================
 
 class VADRecorder:
     def __init__(self):
@@ -116,14 +118,15 @@ def listen_and_record_speech(timeout=10):
     Creates a VADRecorder instance and records one speech segment.
     Returns the filename or None.
     """
-    # This is a workaround for a potential issue where the VAD model
-    # needs to be reloaded in certain execution contexts.
     recorder = VADRecorder()
     filename = recorder.record(timeout=timeout)
     return filename
 
 
-# ====== 1. 상태(State) 정의 ======
+# =========================
+# State Definition
+# =========================
+
 class State(Enum):
     IDLE = 0
     USER_CHECK = 1
@@ -133,27 +136,32 @@ class State(Enum):
     BYE = 5
 
 
-# ====== 2. 전역 변수 및 플래그 ======
-# 상태 전이를 위한 플래그
+# =========================
+# Globals & Flags
+# =========================
+
 FACE_DETECTED = False
 USER_EXIST = False
 ENROLL_SUCCESS = False
 VAD = False
 BYE_EXIST = False
-TIMER_EXPIRED = False  # WELCOME, BYE 상태의 타이머
+TIMER_EXPIRED = False  # WELCOME, BYE state's timer
 
-# 상태 간 데이터 공유를 위한 변수
+# Shared between states
 sh_face_crop = None
 sh_bbox = None
 sh_embedding = None
 sh_current_user = None
-sh_audio_file = None  # 음성 파일 경로 (모의)
+sh_audio_file = None
 sh_message = "Initializing..."
 sh_color = (255, 255, 0)
 sh_timer_end = 0
 sh_prev_unkonw = None
 
-# ====== 3. 유틸리티 함수 ======
+# =========================
+# Utils
+# =========================
+
 DB_PATH = "faces_db.npy"
 SIM_THRESHOLD = 0.65
 
@@ -170,22 +178,9 @@ def save_db(name_list, group_list, embeddings):
     np.save(DB_PATH, {"name_list": name_list, "group_list": group_list, "embeddings": embeddings})
 
 
-def get_name_group_popup():
-    root = tk.Tk()
-    root.withdraw()
-
-    name = simpledialog.askstring("Face Registration", "Enter your name:")
-    if not name:
-        root.destroy()
-        return None, None
-
-    group = simpledialog.askstring("Face Registration", "Enter your group:")
-    root.destroy()
-    return name, group
-
-
 def find_match(embedding, name_list, embeddings):
-    if len(embeddings) == 0: return None, 0
+    if len(embeddings) == 0:
+        return None, 0
     sims = [np.dot(embedding, emb) / (np.linalg.norm(embedding) * np.linalg.norm(emb)) for emb in embeddings]
     max_idx = np.argmax(sims)
     if sims[max_idx] >= SIM_THRESHOLD:
@@ -194,7 +189,7 @@ def find_match(embedding, name_list, embeddings):
         return None, sims[max_idx]
 
 
-# --- 얼굴 검출 및 bbox 갱신 함수 ---
+# Face detection & bbox
 def update_face_detection():
     global FACE_DETECTED, sh_face_crop, sh_bbox, sh_frame
 
@@ -221,8 +216,9 @@ def update_face_detection():
     return results
 
 
-# --- 음성 처리 모의(Mock) 함수 ---
-# TODO: 이 함수들을 실제 음성 처리 모듈로 교체하세요.
+# =========================
+# ASR (Whisper)
+# =========================
 
 import whisper
 
@@ -230,20 +226,20 @@ whisper_model = whisper.load_model("base")
 
 
 def asr_from_wav(file_path: str) -> str:
-    print(f"C:\\Users\\Qualcomm\\workspace\\famigo\\famigo\\{file_path}",
-          os.path.exists(f"C:\\Users\\Qualcomm\\workspace\\famigo\\famigo\\{file_path}"))
-    result = whisper_model.transcribe(f"C:\\Users\\Qualcomm\\workspace\\famigo\\famigo\\{file_path}")
+    print(f"./{file_path}",
+          os.path.exists(f"./{file_path}"))
+    result = whisper_model.transcribe(f"./{file_path}")
     print(result)
     return result['text']
 
 
-# ====== 4. 각 상태의 행동(Action) 함수 정의 ======
+# =========================
+# State Action Functions
+# =========================
 
 def enter_idle():
     global sh_message, sh_color
-
-    results = update_face_detection()  # 얼굴 검출 및 bbox 갱신
-
+    results = update_face_detection()
     if not FACE_DETECTED:
         if results.detections and len(results.detections) > 1:
             sh_message = f"{len(results.detections)} faces detected. Only one please."
@@ -256,9 +252,9 @@ def enter_idle():
 def enter_user_check():
     global USER_EXIST, sh_embedding, sh_current_user, sh_message, sh_color
 
-    update_face_detection()  # 얼굴 검출 및 bbox 갱신
-
-    if sh_face_crop is None: return
+    update_face_detection()
+    if sh_face_crop is None:
+        return
 
     face_pil = Image.fromarray(cv2.cvtColor(sh_face_crop, cv2.COLOR_BGR2RGB))
     face_tensor = preprocess(face_pil).unsqueeze(0)
@@ -274,48 +270,32 @@ def enter_user_check():
         sh_color = (0, 255, 0)
     else:
         USER_EXIST = False
-        sh_message = f"Unknown user. Press 'y' to enroll."
+        sh_message = "Unknown user. Use the right panel to enroll."
         sh_color = (0, 255, 255)
 
 
-def enter_enroll(key):
-    global ENROLL_SUCCESS, name_list, group_list, embeddings, sh_current_user, sh_message, sh_color
+def enter_enroll(key=None):
+    # key kept for signature compatibility; not used
+    global ENROLL_SUCCESS, sh_message, sh_color
 
-    ENROLL_SUCCESS = False
-    results = update_face_detection()  # 얼굴 검출 및 bbox 갱신
+    results = update_face_detection()
 
     if not FACE_DETECTED:
         if results.detections and len(results.detections) > 1:
             sh_message = f"{len(results.detections)} faces detected. Only one please."
             sh_color = (0, 0, 255)
         else:
-            sh_message = "Waiting for user..."
+            sh_message = "등록을 위해 얼굴을 카메라에 비춰주세요."
             sh_color = (255, 255, 0)
     else:
-        sh_message = f"Unknown user. Press 'y' to enroll."
+        sh_message = "알 수 없는 사용자입니다. 오른쪽 패널의 폼으로 등록하세요."
         sh_color = (0, 255, 255)
-
-    if key == ord('y'):
-        new_name, new_group = get_name_group_popup()
-        if new_name and sh_embedding is not None:
-            name_list.append(new_name)
-            group_list.append(new_group)
-            if embeddings.size:
-                embeddings = np.vstack([embeddings, sh_embedding])
-            else:
-                embeddings = np.array([sh_embedding])
-            save_db(name_list, group_list, embeddings)
-            sh_current_user = new_name
-            ENROLL_SUCCESS = True
-            print(f"Enrollment successful for {sh_current_user} from group {new_group}")
-        else:
-            print("Enrollment cancelled.")
 
 
 def enter_welcome():
     global VAD, sh_audio_file, TIMER_EXPIRED, sh_message, sh_color
 
-    update_face_detection()  # 얼굴 검출 및 bbox 갱신
+    update_face_detection()
 
     TIMER_EXPIRED = False
     VAD = False
@@ -324,8 +304,7 @@ def enter_welcome():
 
     if time.time() > sh_timer_end:
         TIMER_EXPIRED = True
-        cv2.destroyAllWindows()
-        print(1)
+        # cv2.destroyAllWindows()  # GUI 창을 쓰지 않으므로 생략
 
         sh_audio_file = listen_and_record_speech(timeout=5)
         if sh_audio_file:
@@ -335,7 +314,7 @@ def enter_welcome():
 def enter_asr():
     global BYE_EXIST
 
-    update_face_detection()  # 얼굴 검출 및 bbox 갱신
+    update_face_detection()
 
     text = asr_from_wav(sh_audio_file)
     text = "".join(text.split())
@@ -348,7 +327,7 @@ def enter_asr():
 def enter_bye():
     global TIMER_EXPIRED, sh_message, sh_color
 
-    update_face_detection()  # 얼굴 검출 및 bbox 갱신
+    update_face_detection()
 
     TIMER_EXPIRED = False
     sh_message = f"Bye, {sh_current_user}!"
@@ -358,31 +337,39 @@ def enter_bye():
         TIMER_EXPIRED = True
 
 
-# ====== 5. 상태 전이 및 호출 함수 ======
+# =========================
+# Transitions & Dispatcher
+# =========================
+
 def state_transition(current_state: State) -> State:
-    global sh_prev_unkonw, sh_embedding
+    global sh_prev_unkonw, sh_embedding, name_list, group_list, embeddings
+
     if current_state == State.IDLE:
         return State.USER_CHECK if FACE_DETECTED else State.IDLE
+
     elif current_state == State.USER_CHECK:
         return State.WELCOME if USER_EXIST else State.ENROLL
 
     elif current_state == State.ENROLL:
-        if not ENROLL_SUCCESS and (
-                sh_embedding is not None and len(sh_embedding) != 0 and sh_prev_unkonw is not None and len(
-                sh_prev_unkonw) != 0) and ((np.dot(sh_prev_unkonw, sh_embedding) / (
-                np.linalg.norm(sh_prev_unkonw) * np.linalg.norm(sh_embedding))) >= SIM_THRESHOLD):
-            return State.ENROLL
+        # Stay in ENROLL until success; go IDLE only if face lost
+        if ENROLL_SUCCESS:
+            print("[Enroll Success] Reloading DB...")
+            name_list, group_list, embeddings = load_db()
+            return State.WELCOME
         sh_prev_unkonw = sh_embedding
-        return State.WELCOME if ENROLL_SUCCESS else State.IDLE
+        return State.IDLE if not FACE_DETECTED else State.ENROLL
 
     elif current_state == State.WELCOME:
         if TIMER_EXPIRED:
             return State.ASR if VAD else State.IDLE
         return State.WELCOME
+
     elif current_state == State.ASR:
         return State.BYE if BYE_EXIST else State.IDLE
+
     elif current_state == State.BYE:
         return State.IDLE if TIMER_EXPIRED else State.BYE
+
     return current_state
 
 
@@ -401,108 +388,259 @@ def call_state_fn(state: State, key):
         enter_bye()
 
 
-# ====== 6. 모델 초기화 및 메인 루프 ======
+# =========================
+# Model Init
+# =========================
+
 print("Loading models...")
 resnet = InceptionResnetV1(pretrained='vggface2').eval()
 mp_face_detection = mp.solutions.face_detection
 face_detection = mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
 preprocess = transforms.Compose([
         transforms.Resize((160, 160)), transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])])
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+])
 name_list, group_list, embeddings = load_db()
 print("Models loaded.")
 
-import time
-import cv2
+# =========================
+# Streamlit UI & Main Loop
+# =========================
+
 import streamlit as st
 
-st.set_page_config(page_title="OpenCV Camera on Streamlit", layout="centered")
+st.set_page_config(page_title="Face Kiosk", layout="wide")
+st.title("👤 Face Kiosk with State UI")
 
-st.title("📷 OpenCV Camera on Streamlit")
+# Layout
+col_video, col_ui = st.columns([3, 2], vertical_alignment="top")
 
-# 카메라 인덱스 선택 (0이 기본 내장/첫 번째 웹캠)
-cam_index = st.number_input("Camera index", min_value=0, max_value=10, value=0, step=1)
+# Camera / Options
+with col_video:
+    st.subheader("📷 Camera")
+    cam_index = st.number_input("Camera index", min_value=0, max_value=10, value=0, step=1)
+    width = st.slider("Frame width", 320, 1920, 640, step=10)
+    run = st.toggle("Run camera", value=False)
+    frame_slot = st.empty()
 
-# 좌우반전/해상도 옵션
-flip = st.checkbox("Flip horizontally", value=True)
-width = st.slider("Frame width", 320, 1920, 640, step=10)
-run = st.toggle("Run camera", value=False)
+# UI placeholders
+with col_ui:
+    st.subheader("🧭 State Panel")
+    state_badge = st.empty()
+    message_slot = st.empty()
+    enroll_slot = st.empty()
+    welcome_slot = st.empty()
+    asr_slot = st.empty()
+    bye_slot = st.empty()
+    audio_slot = st.empty()
+    debug_slot = st.expander("Debug", expanded=False)
 
-# 영상 표시용 placeholder
-frame_slot = st.empty()
-
-# 상태 유지용
+# Keep only camera handle in session_state
 if "cap" not in st.session_state:
     st.session_state.cap = None
 
-def open_camera(index: int):
+
+def open_camera(index: int, target_w: int):
     cap = cv2.VideoCapture(index)
-    # 해상도 설정 (가능한 경우)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, target_w)
     return cap
 
-# cap = cv2.VideoCapture(0)
+
+# ENROLL UI lifecycle flags
+ENROLL_UI_BUILT = False
+enroll_face_ph = None
+
+# Initial state
 state = State.IDLE
-print("Starting state machine...")
+st.caption("Starting state machine...")
+
+
+# ENROLL submit helper (uses Streamlit; defined after importing st)
+def ui_enroll_submit(new_name: str, new_group: str):
+    global ENROLL_SUCCESS, name_list, group_list, embeddings, sh_current_user
+
+    if not new_name or new_name.strip() == "":
+        st.warning("이름은 필수입니다.")
+        return
+    if sh_embedding is None or len(sh_embedding) == 0:
+        st.error("얼굴 임베딩이 준비되지 않았습니다. 카메라에 얼굴을 똑바로 비춰주세요.")
+        return
+    if any(n == new_name for n in name_list):
+        st.warning("이미 존재하는 이름입니다. 다른 이름을 입력하세요.")
+        return
+
+    name_list.append(new_name)
+    group_list.append(new_group)
+
+    if embeddings.size:
+        embeddings = np.vstack([embeddings, sh_embedding])
+    else:
+        embeddings = np.array([sh_embedding])
+
+    save_db(name_list, group_list, embeddings)
+
+    sh_current_user = new_name
+    ENROLL_SUCCESS = True
+    USER_EXIST = True
+
+    st.success(f"등록 완료: {new_name} ({new_group if new_group else 'group 미지정'})")
+    print("[DB Updated] ", name_list, group_list, embeddings.shape)
+
+
 if run:
-    # 카메라 열기
+    # Open camera once
     if st.session_state.cap is None or not st.session_state.cap.isOpened():
-        st.session_state.cap = open_camera(int(cam_index))
+        st.session_state.cap = open_camera(int(cam_index), int(width))
         if not st.session_state.cap.isOpened():
             st.error("카메라를 열 수 없습니다. 인덱스를 바꾸거나 다른 앱을 종료해보세요.")
             st.stop()
 
+
+    # UI helper: render state panel
+    def render_state_panel(current_state: State):
+        global ENROLL_UI_BUILT, enroll_face_ph
+
+        # Badge
+        state_badge.markdown(f"**Current State:** :blue[{current_state.name}]")
+
+        # --- 중요: 현재 상태가 ENROLL일 때는 enroll_slot을 비우지 않는다!
+        if current_state != State.ENROLL:
+            enroll_slot.empty()  # ENROLL을 벗어나는 순간에만 비움
+
+        # 다른 상태 슬롯들은 매 프레임 초기화 가능
+        if current_state != State.WELCOME:
+            welcome_slot.empty()
+        if current_state != State.ASR:
+            asr_slot.empty()
+        if current_state != State.BYE:
+            bye_slot.empty()
+
+        # Message
+        with message_slot.container():
+            st.markdown(f"**Message:** {sh_message}")
+
+        # ENROLL UI (form created once)
+        if current_state == State.ENROLL:
+            if not ENROLL_UI_BUILT:
+                ENROLL_UI_BUILT = True
+                with enroll_slot.container():
+                    st.info("알 수 없는 사용자입니다. 아래 폼으로 등록을 진행하세요.")
+                    enroll_face_ph = st.empty()
+
+                    with st.form(key="form_enroll", clear_on_submit=False):
+                        new_name = st.text_input("이름", key="enroll_name")
+                        new_group = st.text_input("그룹(선택)", key="enroll_group")
+                        submitted = st.form_submit_button("등록하기", use_container_width=True)
+                    if submitted:
+                        ui_enroll_submit(new_name, new_group)
+
+            # Update face preview
+            if enroll_face_ph is not None:
+                if sh_face_crop is not None and sh_face_crop.size != 0:
+                    face_rgb = cv2.cvtColor(sh_face_crop, cv2.COLOR_BGR2RGB)
+                    enroll_face_ph.image(face_rgb, caption="등록할 얼굴", use_container_width=True)
+                else:
+                    enroll_face_ph.warning("얼굴이 감지되지 않았습니다. 카메라를 향해 한 명만 비춰주세요.")
+        else:
+            # Leaving ENROLL -> reset UI so it can be rebuilt on next entry
+            if ENROLL_UI_BUILT:
+                ENROLL_UI_BUILT = False
+                enroll_face_ph = None
+                enroll_slot.empty()
+
+        # WELCOME UI
+        if current_state == State.WELCOME:
+            with welcome_slot.container():
+                st.success(f"Hi, **{sh_current_user}**! 잠시 후 음성 녹음을 시작합니다.")
+                remain = max(0.0, sh_timer_end - time.time())
+                pct = min(max(1.0 - (remain / 2.0), 0.0), 1.0)
+                st.progress(pct, text="Greeting...")
+
+        # ASR UI
+        if current_state == State.ASR:
+            with asr_slot.container():
+                st.info("음성 인식 결과")
+                if sh_audio_file:
+                    audio_slot.audio(sh_audio_file)
+                    st.write("녹음 파일 재생 가능")
+                st.write(f"**BYE detected:** {'Yes' if BYE_EXIST else 'No'}")
+
+        # BYE UI
+        if current_state == State.BYE:
+            with bye_slot.container():
+                st.warning(f"Bye, **{sh_current_user}**!")
+                remain = max(0.0, sh_timer_end - time.time())
+                pct = min(max(1.0 - (remain / 2.0), 0.0), 1.0)
+                st.progress(pct, text="Ending...")
+
+
+    # Main loop
     while run:
         success, sh_frame = st.session_state.cap.read()
-        if not success: break
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'): break
+        if not success:
+            st.error("프레임을 읽지 못했습니다.")
+            break
 
+        # Key (kept for compatibility; not used for enroll)
+        key = cv2.waitKey(1) & 0xFF
+
+        # Call & transition
         call_state_fn(state, key)
         new_state = state_transition(state)
 
         if new_state != state:
             print(f"State Change: {state.name} -> {new_state.name}")
-            state = new_state
-            # 상태 진입 시 초기화 로직
-            if state == State.WELCOME:
-                sh_timer_end = time.time() + 2.0  # 2초간 인사
-            elif state == State.BYE:
-                sh_timer_end = time.time() + 2.0  # 2초간 작별인사
+            if new_state == State.ENROLL:
+                ENROLL_SUCCESS = False
+                USER_EXIST = False  # 안전하게 초기화 (선택)
 
-        # 화면 그리기
+            state = new_state
+            if state == State.WELCOME:
+                sh_timer_end = time.time() + 2.0  # greeting 2s
+            elif state == State.BYE:
+                sh_timer_end = time.time() + 2.0  # bye 2s
+
+        # Update state panel
+        render_state_panel(state)
+
+        # Draw overlays
         display_frame = sh_frame.copy()
 
         if sh_bbox:
             x, y, w, h = sh_bbox
             cv2.rectangle(display_frame, (x, y), (x + w, y + h), sh_color, 2)
-            cv2.putText(display_frame, sh_message, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, sh_color, 2)
+            cv2.putText(display_frame, sh_message, (x, y - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, sh_color, 2)
         else:
-            cv2.putText(display_frame, sh_message, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, sh_color, 2)
-        # cv2.imshow('State Machine', display_frame)
+            cv2.putText(display_frame, sh_message, (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, sh_color, 2)
+
+        # Show frame
         frame_rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
-
-        # 사이즈 맞추기 (가로 기준)
-        h, w, _ = frame_rgb.shape
-        new_h = int(h * (width / w))
+        h0, w0, _ = frame_rgb.shape
+        new_h = int(h0 * (width / w0))
         frame_rgb = cv2.resize(frame_rgb, (int(width), new_h))
+        frame_slot.image(frame_rgb, channels="RGB", caption="Live", use_container_width=True)
 
-        # 화면에 출력
-        frame_slot.image(frame_rgb, channels="RGB", caption="Live", use_container_width=False)
+        # Debug info
+        with debug_slot:
+            st.write({
+                    "FACE_DETECTED" : FACE_DETECTED,
+                    "USER_EXIST"    : USER_EXIST,
+                    "ENROLL_SUCCESS": ENROLL_SUCCESS,
+                    "VAD"           : VAD,
+                    "BYE_EXIST"     : BYE_EXIST,
+                    "TIMER_EXPIRED" : TIMER_EXPIRED,
+                    "current_user"  : sh_current_user,
+                    "audio_file"    : sh_audio_file
+            })
 
-        # CPU 사용률/지연 줄이기
         time.sleep(0.01)
+        run = st.session_state.get("_toggle_run", True)
 
-        # 토글 상태 갱신
-        run = st.session_state.get("_toggle_run", True)  # 내부 보호
-
-    # 루프 종료 시 자원 해제
+    # Cleanup
     if st.session_state.cap is not None:
         st.session_state.cap.release()
         st.session_state.cap = None
         frame_slot.empty()
         st.info("카메라를 종료했습니다.")
-
-    # cap.release()
-    # cv2.destroyAllWindows()
-    # face_detection.close()
