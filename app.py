@@ -380,6 +380,7 @@ def start_asr_async(file_path: str):
         try:
             text = asr_from_wav(file_path)
             ASR_TEXT = text
+            print(f"ASR result: {ASR_TEXT}")
             t = "".join(text.split())
             BYE_EXIST = ("잘가" in t) or ("bye" in t.lower())
         finally:
