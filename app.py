@@ -32,7 +32,6 @@ DEFAULT_TTS_SR = 24000  # Kokoro sample rate
 # =========================
 # 캐시된 싱글톤 리소스 (중복 로딩 방지)
 # =========================
-
 @st.cache_resource
 def get_whisper_model(model_name="base.en", device=None):
     import whisper
@@ -75,7 +74,6 @@ def get_kokoro_pipeline():
 # =========================
 # VAD Recorder (shared model)
 # =========================
-
 class VADRecorder:
     def __init__(self, model=None, utils=None):
         if model is None or utils is None:
@@ -170,7 +168,6 @@ def listen_and_record_speech(timeout=10, model=None, utils=None):
 # =========================
 # State Definition
 # =========================
-
 class State(Enum):
     IDLE = 0
     USER_CHECK = 1
@@ -183,8 +180,6 @@ class State(Enum):
 # =========================
 # Globals & Flags
 # =========================
-
-# 상태 플래그
 FACE_DETECTED = False
 USER_EXIST = False
 ENROLL_SUCCESS = False
@@ -204,12 +199,19 @@ sh_color = (255, 255, 0)
 sh_timer_end = 0
 sh_prev_unkonw = None
 
+# ❗ 세션 한정 그룹명 (WELCOME~BYE 사이 메모리 보관)
+sh_session_group = None
+
 # async flags
 VAD_TASK_STARTED = False
 VAD_TASK_RUNNING = False
 ASR_TASK_STARTED = False
 ASR_TASK_RUNNING = False
 ASR_TEXT = None
+
+if "_epoch" not in st.session_state:
+    st.session_state["_epoch"] = 0
+st.session_state["_epoch"] += 1
 
 # DB / threshold
 DB_PATH = "faces_db.npy"
@@ -221,19 +223,20 @@ _bbox_history = deque(maxlen=BBOX_AVG_N)
 
 
 # =========================
-# Utils
+# Utils (DB: name_list + embeddings 만 사용)
 # =========================
-
 def load_db():
     if os.path.exists(DB_PATH):
         data = np.load(DB_PATH, allow_pickle=True).item()
-        return data["name_list"], data["group_list"], data["embeddings"]
+        name = data["name_list"]
+        embs = data["embeddings"]
+        return name, embs
     else:
-        return [], [], np.empty((0, 512))
+        return [], np.empty((0, 512))
 
 
-def save_db(name_list, group_list, embeddings):
-    np.save(DB_PATH, {"name_list": name_list, "group_list": group_list, "embeddings": embeddings})
+def save_db(name_list, embeddings):
+    np.save(DB_PATH, {"name_list": name_list, "embeddings": embeddings})
 
 
 def find_match(embedding, name_list, embeddings):
@@ -259,7 +262,7 @@ def _clip_bbox(x, y, w, h, iw, ih):
 def update_face_detection():
     global FACE_DETECTED, sh_face_crop, sh_bbox, sh_frame, _bbox_history, BBOX_AVG_N
 
-    # deque maxlen 따라 동적으로 갱신 (슬라이더 변경 대응)
+    # deque maxlen 동적 반영
     if _bbox_history.maxlen != BBOX_AVG_N:
         _bbox_history = deque(list(_bbox_history), maxlen=BBOX_AVG_N)
 
@@ -273,9 +276,9 @@ def update_face_detection():
         FACE_DETECTED = True
         det = results.detections[0]
         bboxC = det.location_data.relative_bounding_box
-        x = int(bboxC.xmin * iw);
+        x = int(bboxC.xmin * iw)
         y = int(bboxC.ymin * ih)
-        w = int(bboxC.width * iw);
+        w = int(bboxC.width * iw)
         h = int(bboxC.height * ih)
         x, y, w, h = _clip_bbox(x, y, w, h, iw, ih)
 
@@ -307,7 +310,6 @@ def update_face_detection():
 # =========================
 # Whisper ASR (cached)
 # =========================
-
 def asr_from_wav(file_path: str) -> str:
     result = whisper_model.transcribe(file_path)
     return result['text']
@@ -316,7 +318,6 @@ def asr_from_wav(file_path: str) -> str:
 # =========================
 # TTS helpers (Kokoro)
 # =========================
-
 def build_tts_reply_text(asr_text: str, user: str | None) -> str:
     t = "".join(asr_text.split()).lower()
     if "잘가" in t or "bye" in t:
@@ -348,7 +349,6 @@ def synthesize_tts_kokoro(text: str) -> str | None:
 # =========================
 # State Action Functions
 # =========================
-
 def enter_idle():
     global sh_message, sh_color
     results = update_face_detection()
@@ -363,11 +363,9 @@ def enter_idle():
 
 def enter_user_check():
     global USER_EXIST, sh_embedding, sh_current_user, sh_message, sh_color
-
     update_face_detection()
     if sh_face_crop is None:
         return
-
     face_pil = Image.fromarray(cv2.cvtColor(sh_face_crop, cv2.COLOR_BGR2RGB))
     face_tensor = preprocess(face_pil).unsqueeze(0)
     with torch.no_grad():
@@ -388,7 +386,6 @@ def enter_user_check():
 
 def enter_enroll(key=None):
     global sh_message, sh_color
-
     results = update_face_detection()
     if not FACE_DETECTED:
         if results.detections and len(results.detections) > 1:
@@ -404,7 +401,6 @@ def enter_enroll(key=None):
 
 def enter_welcome():
     global VAD, sh_audio_file, TIMER_EXPIRED, sh_message, sh_color
-
     update_face_detection()
     sh_message = f"Hi, {sh_current_user}!"
     sh_color = (0, 255, 0)
@@ -422,7 +418,6 @@ def enter_asr():
 
 def enter_bye():
     global TIMER_EXPIRED, sh_message, sh_color
-
     update_face_detection()
     sh_message = f"Bye, {sh_current_user}!"
     sh_color = (255, 0, 255)
@@ -432,7 +427,6 @@ def enter_bye():
 # =========================
 # Async Workers
 # =========================
-
 def start_vad_async(timeout=5):
     """녹음을 비동기로 시작."""
     global VAD_TASK_STARTED, VAD_TASK_RUNNING
@@ -444,7 +438,6 @@ def start_vad_async(timeout=5):
     def _worker():
         global sh_audio_file, VAD, VAD_TASK_RUNNING
         try:
-            # 메인에서 미리 로드한 객체를 넘겨줌
             filename = listen_and_record_speech(timeout=timeout, model=vad_model, utils=vad_utils)
             if filename:
                 sh_audio_file = filename
@@ -467,7 +460,6 @@ def start_asr_async(file_path: str):
 
     def _worker():
         global ASR_TEXT, BYE_EXIST, ASR_TASK_RUNNING, sh_tts_file
-
         try:
             text = asr_from_wav(file_path)
             ASR_TEXT = text
@@ -487,9 +479,8 @@ def start_asr_async(file_path: str):
 # =========================
 # Transitions & Dispatcher
 # =========================
-
 def state_transition(current_state: State) -> State:
-    global sh_prev_unkonw, sh_embedding, name_list, group_list, embeddings
+    global sh_prev_unkonw, sh_embedding, name_list, embeddings
 
     if current_state == State.IDLE:
         return State.USER_CHECK if FACE_DETECTED else State.IDLE
@@ -499,7 +490,8 @@ def state_transition(current_state: State) -> State:
 
     elif current_state == State.ENROLL:
         if ENROLL_SUCCESS:
-            name_list, group_list, embeddings = load_db()
+            # DB 재로딩 (새 스키마)
+            name_list, embeddings = load_db()
             return State.WELCOME
         sh_prev_unkonw = sh_embedding
         return State.IDLE if not FACE_DETECTED else State.ENROLL
@@ -544,7 +536,6 @@ def call_state_fn(state: State, key):
 # =========================
 # Model Init (cached)
 # =========================
-
 print("Loading models (cached)...")
 resnet = get_facenet_model()
 face_detection = get_face_detector()
@@ -558,13 +549,12 @@ preprocess = transforms.Compose([
         transforms.Resize((160, 160)), transforms.ToTensor(),
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
 ])
-name_list, group_list, embeddings = load_db()
+name_list, embeddings = load_db()
 print("Models loaded (using cache).")
 
 # =========================
 # Streamlit UI & Main Loop
 # =========================
-
 st.set_page_config(page_title="Face Kiosk", layout="wide")
 st.title("👤 Face Kiosk with State UI")
 
@@ -608,16 +598,19 @@ enroll_face_ph = None
 enroll_form_counter = 0
 current_enroll_form_key = None
 current_enroll_name_key = None
-current_enroll_group_key = None
+
+# WELCOME 그룹 입력용 고유 키
+WELCOME_KEY = None
+WELCOME_KEY_COUNTER = 0
 
 # Initial state
 state = State.IDLE
 st.caption("Starting state machine...")
 
 
-# ENROLL submit helper
-def ui_enroll_submit(new_name: str, new_group: str):
-    global ENROLL_SUCCESS, USER_EXIST, name_list, group_list, embeddings, sh_current_user
+# ENROLL submit helper (이름만 저장)
+def ui_enroll_submit(new_name: str):
+    global ENROLL_SUCCESS, USER_EXIST, name_list, embeddings, sh_current_user
 
     if not new_name or new_name.strip() == "":
         st.warning("이름은 필수입니다.")
@@ -630,26 +623,24 @@ def ui_enroll_submit(new_name: str, new_group: str):
         return
 
     name_list.append(new_name)
-    group_list.append(new_group)
     if embeddings.size:
         embeddings = np.vstack([embeddings, sh_embedding])
     else:
         embeddings = np.array([sh_embedding])
 
-    save_db(name_list, group_list, embeddings)
+    save_db(name_list, embeddings)
 
     sh_current_user = new_name
     ENROLL_SUCCESS = True
     USER_EXIST = True
 
-    st.success(f"등록 완료: {new_name} ({new_group if new_group else 'group 미지정'})")
-    print("[DB Updated] ", name_list, group_list, embeddings.shape)
+    st.success(f"등록 완료: {new_name}")
+    print("[DB Updated] ", name_list, embeddings.shape)
 
 
 # UI render helper
 def render_state_panel(current_state: State):
-    global ENROLL_UI_BUILT, enroll_face_ph
-    global current_enroll_form_key, current_enroll_name_key, current_enroll_group_key
+    global ENROLL_UI_BUILT, enroll_face_ph, sh_session_group
 
     state_badge.markdown(f"**Current State:** :blue[{current_state.name}]")
 
@@ -666,26 +657,25 @@ def render_state_panel(current_state: State):
     with message_slot.container():
         st.markdown(f"**Message:** {sh_message}")
 
+    # ENROLL: 이름만 입력
     if current_state == State.ENROLL:
         # ensure unique keys
-        if current_enroll_form_key is None or current_enroll_name_key is None or current_enroll_group_key is None:
+        if current_enroll_form_key is None or current_enroll_name_key is None:
             ts = int(time.time() * 1000)
-            current_enroll_form_key = f"form_enroll_{ts}"
-            current_enroll_name_key = f"enroll_name_{ts}"
-            current_enroll_group_key = f"enroll_group_{ts}"
+            globals()['current_enroll_form_key'] = f"form_enroll_{ts}"
+            globals()['current_enroll_name_key'] = f"enroll_name_{ts}"
 
         if not ENROLL_UI_BUILT:
-            ENROLL_UI_BUILT = True
+            globals()['ENROLL_UI_BUILT'] = True
             with enroll_slot.container():
                 st.info("알 수 없는 사용자입니다. 아래 폼으로 등록을 진행하세요.")
-                enroll_face_ph = st.empty()
+                globals()['enroll_face_ph'] = st.empty()
 
                 with st.form(key=current_enroll_form_key, clear_on_submit=False):
                     new_name = st.text_input("이름", key=current_enroll_name_key)
-                    new_group = st.text_input("그룹(선택)", key=current_enroll_group_key)
                     submitted = st.form_submit_button("등록하기", use_container_width=True)
                 if submitted:
-                    ui_enroll_submit(new_name, new_group)
+                    ui_enroll_submit(new_name)
 
         # face preview
         if enroll_face_ph is not None:
@@ -696,11 +686,38 @@ def render_state_panel(current_state: State):
                 enroll_face_ph.warning("얼굴이 감지되지 않았습니다. 카메라를 향해 한 명만 비춰주세요.")
     else:
         if ENROLL_UI_BUILT:
-            ENROLL_UI_BUILT = False
-            enroll_face_ph = None
+            globals()['ENROLL_UI_BUILT'] = False
+            globals()['enroll_face_ph'] = None
 
+    # WELCOME: 세션 한정 그룹 입력
     if current_state == State.WELCOME:
         with welcome_slot.container():
+            # 고유 WELCOME key 준비 (없으면 발급)
+            if WELCOME_KEY is None:
+                globals()['WELCOME_KEY_COUNTER'] += 1
+                globals()['WELCOME_KEY'] = f"welcome_group_input_{WELCOME_KEY_COUNTER}"
+
+            # 이번 실행에서 이미 그렸는지 체크하는 렌더 가드
+            if "welcome_drawn_epoch" not in st.session_state:
+                st.session_state["welcome_drawn_epoch"] = -1
+
+            if st.session_state["welcome_drawn_epoch"] != st.session_state["_epoch"]:
+                # ▶ 이번 실행에서 '첫' 생성만 허용
+                group_input = st.text_input(
+                        "그룹명 (세션 한정, DB 저장 안 함)",
+                        value=sh_session_group or "",
+                        placeholder="예: slpr",
+                        key=WELCOME_KEY,
+                )
+                st.session_state["welcome_drawn_epoch"] = st.session_state["_epoch"]
+            else:
+                # ▶ 같은 실행에서 두 번째 호출이면 '생성'하지 말고 현재 값을 읽기만
+                group_input = st.session_state.get(WELCOME_KEY, sh_session_group or "")
+
+            # 글로벌 세션-그룹 반영
+            globals()['sh_session_group'] = (group_input or "").strip() or None
+
+            # 이하 기존 진행 표시 UI 그대로...
             if not (time.time() > sh_timer_end):
                 remain = max(0.0, sh_timer_end - time.time())
                 st.success(f"Hi, **{sh_current_user}**! 곧 녹음을 시작합니다.")
@@ -713,6 +730,7 @@ def render_state_panel(current_state: State):
                 else:
                     st.warning("녹음을 시작하지 못했습니다. 돌아갑니다.")
 
+    # ASR: 진행상태/결과
     if current_state == State.ASR:
         with asr_slot.container():
             if ASR_TASK_RUNNING:
@@ -725,9 +743,12 @@ def render_state_panel(current_state: State):
             else:
                 st.write("대기 중...")
 
+    # BYE
     if current_state == State.BYE:
         with bye_slot.container():
             st.warning(f"Bye, **{sh_current_user}**!")
+            if sh_session_group:
+                st.caption(f"(세션 그룹: {sh_session_group})")
             remain = max(0.0, sh_timer_end - time.time())
             pct = min(max(1.0 - (remain / 2.0), 0.0), 1.0)
             st.progress(pct, text="Ending...")
@@ -764,7 +785,7 @@ if run:
         if new_state != state:
             print(f"State Change: {state.name} -> {new_state.name}")
 
-            # ENROLL로 진입 시: 고유 키 생성 + 초기화
+            # ENROLL로 진입 시: 초기화 및 폼 키 설정
             if new_state == State.ENROLL and state != State.ENROLL:
                 ENROLL_SUCCESS = False
                 USER_EXIST = False
@@ -772,16 +793,24 @@ if run:
                 enroll_form_counter += 1
                 current_enroll_form_key = f"form_enroll_{enroll_form_counter}"
                 current_enroll_name_key = f"enroll_name_{enroll_form_counter}"
-                current_enroll_group_key = f"enroll_group_{enroll_form_counter}"
 
-            # WELCOME로 진입 시: 타이머/녹음 플래그 초기화
+            # WELCOME로 진입 시: 타이머/녹음 플래그 초기화 + 세션 그룹 초기화
             if new_state == State.WELCOME:
                 sh_timer_end = time.time() + 2.0
                 VAD = False
                 VAD_TASK_STARTED = False
                 VAD_TASK_RUNNING = False
                 sh_audio_file = None
-                sh_tts_file = None  # clear any prior TTS
+                sh_tts_file = None
+                sh_session_group = None
+
+                # 🔑 WELCOME 입력 위젯용 고유 key 생성
+                WELCOME_KEY_COUNTER += 1
+                WELCOME_KEY = f"welcome_group_input_{WELCOME_KEY_COUNTER}"
+                # 혹시 예전 세션 key가 session_state에 남아있을 수 있으니 방어적으로 정리
+                for k in list(st.session_state.keys()):
+                    if k.startswith("welcome_group_input_") and k != WELCOME_KEY:
+                        st.session_state.pop(k, None)
 
             # ASR로 진입 시: ASR 비동기 초기화
             if new_state == State.ASR:
@@ -789,11 +818,18 @@ if run:
                 BYE_EXIST = False
                 ASR_TASK_STARTED = False
                 ASR_TASK_RUNNING = False
-                sh_tts_file = None
+                # 그룹은 유지 (BYE까지)
 
             # BYE로 진입 시: 타이머
             if new_state == State.BYE:
                 sh_timer_end = time.time() + 2.0
+
+            # BYE -> IDLE로 떠날 때: 세션 그룹 완전 제거
+            if state == State.BYE and new_state == State.IDLE:
+                sh_session_group = None
+                if WELCOME_KEY and WELCOME_KEY in st.session_state:
+                    st.session_state.pop(WELCOME_KEY, None)
+                WELCOME_KEY = None
 
             state = new_state
 
@@ -829,6 +865,7 @@ if run:
                     "BYE_EXIST"         : BYE_EXIST,
                     "TIMER_EXPIRED"     : TIMER_EXPIRED,
                     "current_user"      : sh_current_user,
+                    "session_group"     : sh_session_group,  # ← 세션 한정 그룹 표시 (DB 저장 안 함)
                     "audio_file"        : sh_audio_file,
                     "tts_file"          : sh_tts_file,
                     "bbox_avg_n"        : BBOX_AVG_N,
