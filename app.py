@@ -453,7 +453,7 @@ def call_state_fn(state: State, key):
 print("Loading models (cached)...")
 resnet = get_facenet_model()
 face_detection = get_face_detector()
-whisper_model = get_whisper_model("base")
+whisper_model = get_whisper_model("base.en")
 preprocess = transforms.Compose([
         transforms.Resize((160, 160)), transforms.ToTensor(),
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
