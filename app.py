@@ -1,47 +1,66 @@
-import cv2
-import mediapipe as mp
-from facenet_pytorch import InceptionResnetV1
-from PIL import Image
-import torchvision.transforms as transforms
 import os
+import time
+import ssl
+import threading
 from enum import Enum
-import torch
+from collections import deque
+
+import cv2
 import numpy as np
 import sounddevice as sd
-from collections import deque
-import time
 import soundfile as sf
-import threading
+import torch
+import torchvision.transforms as transforms
+from PIL import Image
+import mediapipe as mp
+import streamlit as st
+from facenet_pytorch import InceptionResnetV1
 
-# ====== 전역 플래그 추가 ======
-VAD_TASK_STARTED = False
-VAD_TASK_RUNNING = False
-
-ASR_TASK_STARTED = False
-ASR_TASK_RUNNING = False
-ASR_TEXT = None
-
-import ssl
-
-ssl._create_default_https_context = ssl._create_unverified_context
+ssl._create_default_https_context = ssl._create_unverified_context  # (torch.hub SSL 회피용)
 
 
 # =========================
-# VAD Recorder
+# 캐시된 싱글톤 리소스 (중복 로딩 방지)
+# =========================
+
+@st.cache_resource
+def get_whisper_model(model_name="large-v3", device=None):
+    import whisper
+    return whisper.load_model(model_name) if device is None else whisper.load_model(model_name, device=device)
+
+
+@st.cache_resource
+def get_facenet_model():
+    return InceptionResnetV1(pretrained='vggface2').eval()
+
+
+@st.cache_resource
+def get_silero_vad_bundle():
+    model, utils = torch.hub.load(
+            repo_or_dir='snakers4/silero-vad',
+            model='silero_vad',
+            trust_repo=True
+    )
+    return model, utils
+
+
+@st.cache_resource
+def get_face_detector():
+    return mp.solutions.face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
+
+
+# =========================
+# VAD Recorder (공유 모델 사용)
 # =========================
 
 class VADRecorder:
-    def __init__(self):
-        # Load model
-        self.model, self.utils = torch.hub.load(
-                repo_or_dir='snakers4/silero-vad',
-                model='silero_vad',
-                # force_reload=True,
-                trust_repo=True
-        )
-        self.vad_iterator = self.utils[3](self.model)  # VADIterator is the 4th element
+    def __init__(self, model=None, utils=None):
+        if model is None or utils is None:
+            model, utils = get_silero_vad_bundle()
+        self.model = model
+        self.utils = utils
+        self.vad_iterator = self.utils[3](self.model)  # VADIterator
 
-        # Settings
         self.SAMPLE_RATE = 16000
         self.BUFFER_SIZE = self.SAMPLE_RATE * 60  # 1 minute buffer
         self.THRESHOLD = 0.65
@@ -49,7 +68,6 @@ class VADRecorder:
         self.MARGIN = 1
         self.SILENCE_TIME = 0.6
 
-        # State
         self.reset_state()
 
     def reset_state(self):
@@ -66,11 +84,9 @@ class VADRecorder:
         start = max(0, start_sample - int(self.MARGIN * self.SAMPLE_RATE))
         end = min(len(audio_array), end_sample + int(self.MARGIN * self.SAMPLE_RATE))
         segment = audio_array[start:end]
-
         if len(segment) / self.SAMPLE_RATE < self.MIN_DURATION:
-            print(f"Segment too short, skipping save.")
+            print("Segment too short, skipping save.")
             return
-
         filename = f"speech_{time.strftime('%Y%m%d_%H%M%S')}.wav"
         sf.write(filename, segment, self.SAMPLE_RATE)
         print(f"Audio saved: {filename}")
@@ -79,13 +95,11 @@ class VADRecorder:
     def _callback(self, indata, frames, time_info, status):
         if status:
             print(status)
-
         if self.saved_filename:  # Stop if we already have a file
             return
 
         audio_int16 = (indata * 32768).astype(np.int16).flatten()
         self.audio_buffer.extend(audio_int16)
-
         if len(audio_int16) < 512:
             return
 
@@ -107,7 +121,6 @@ class VADRecorder:
                     duration = (speech_end_sample - self.speech_start_sample) / self.SAMPLE_RATE
                     if duration >= self.MIN_DURATION:
                         self._save_audio_segment(self.speech_start_sample, speech_end_sample)
-
         self.sample_counter += frames
 
     def record(self, timeout=10):
@@ -120,18 +133,13 @@ class VADRecorder:
                 if self.saved_filename:
                     break
                 sd.sleep(100)
-
         print("Finished listening.")
         return self.saved_filename
 
 
-# For use in other scripts
 def listen_and_record_speech(timeout=10):
-    """
-    Creates a VADRecorder instance and records one speech segment.
-    Returns the filename or None.
-    """
-    recorder = VADRecorder()
+    model, utils = get_silero_vad_bundle()
+    recorder = VADRecorder(model=model, utils=utils)
     filename = recorder.record(timeout=timeout)
     return filename
 
@@ -153,6 +161,7 @@ class State(Enum):
 # Globals & Flags
 # =========================
 
+# 상태 플래그
 FACE_DETECTED = False
 USER_EXIST = False
 ENROLL_SUCCESS = False
@@ -160,7 +169,7 @@ VAD = False
 BYE_EXIST = False
 TIMER_EXPIRED = False  # WELCOME, BYE state's timer
 
-# Shared between states
+# 공유 데이터
 sh_face_crop = None
 sh_bbox = None
 sh_embedding = None
@@ -171,13 +180,21 @@ sh_color = (255, 255, 0)
 sh_timer_end = 0
 sh_prev_unkonw = None
 
-# =========================
-# Utils
-# =========================
+# 비동기 작업 플래그
+VAD_TASK_STARTED = False
+VAD_TASK_RUNNING = False
+ASR_TASK_STARTED = False
+ASR_TASK_RUNNING = False
+ASR_TEXT = None
 
+# DB/Threshold
 DB_PATH = "faces_db.npy"
 SIM_THRESHOLD = 0.65
 
+
+# =========================
+# Utils
+# =========================
 
 def load_db():
     if os.path.exists(DB_PATH):
@@ -225,24 +242,16 @@ def update_face_detection():
         FACE_DETECTED = False
         sh_bbox = None
         sh_face_crop = None
-
     return results
 
 
 # =========================
-# ASR (Whisper)
+# Whisper ASR (캐시된 모델 사용)
 # =========================
 
-import whisper
-
-whisper_model = whisper.load_model("large-v3")
-
-
 def asr_from_wav(file_path: str) -> str:
-    print(f"./{file_path}",
-          os.path.exists(f"./{file_path}"))
+    print(f"./{file_path}", os.path.exists(f"./{file_path}"))
     result = whisper_model.transcribe(f"./{file_path}")
-    print(result)
     return result['text']
 
 
@@ -288,11 +297,10 @@ def enter_user_check():
 
 
 def enter_enroll(key=None):
-    # key kept for compatibility; do not reset ENROLL_SUCCESS here!
+    # 키보드 입력은 사용하지 않음 (UI에서 처리)
     global sh_message, sh_color
 
     results = update_face_detection()
-
     if not FACE_DETECTED:
         if results.detections and len(results.detections) > 1:
             sh_message = f"{len(results.detections)} faces detected. Only one please."
@@ -309,23 +317,16 @@ def enter_welcome():
     global VAD, sh_audio_file, TIMER_EXPIRED, sh_message, sh_color
 
     update_face_detection()
-
-    # 메시지/색상
     sh_message = f"Hi, {sh_current_user}!"
     sh_color = (0, 255, 0)
 
-    # 타이머 만료 여부를 매 프레임 계산
     TIMER_EXPIRED = (time.time() > sh_timer_end)
-
-    # 타이머가 끝났고, 아직 녹음 시작 안 했으면 비동기 시작
     if TIMER_EXPIRED and not VAD_TASK_STARTED:
         start_vad_async(timeout=5)
 
 
 def enter_asr():
     update_face_detection()
-
-    # 오디오가 있고, 아직 ASR 시작 안 했으면 비동기 시작
     if sh_audio_file and not ASR_TASK_STARTED:
         start_asr_async(sh_audio_file)
 
@@ -334,19 +335,19 @@ def enter_bye():
     global TIMER_EXPIRED, sh_message, sh_color
 
     update_face_detection()
-
-    TIMER_EXPIRED = False
     sh_message = f"Bye, {sh_current_user}!"
     sh_color = (255, 0, 255)
+    TIMER_EXPIRED = (time.time() > sh_timer_end)
 
-    if time.time() > sh_timer_end:
-        TIMER_EXPIRED = True
 
+# =========================
+# Async Workers
+# =========================
 
 def start_vad_async(timeout=5):
-    """녹음을 비동기로 시작한다. 완료 시 sh_audio_file, VAD 갱신."""
+    """녹음을 비동기로 시작."""
     global VAD_TASK_STARTED, VAD_TASK_RUNNING
-    if VAD_TASK_RUNNING:  # 이미 실행 중
+    if VAD_TASK_RUNNING:
         return
     VAD_TASK_STARTED = True
     VAD_TASK_RUNNING = True
@@ -367,7 +368,7 @@ def start_vad_async(timeout=5):
 
 
 def start_asr_async(file_path: str):
-    """Whisper를 비동기로 실행한다. 완료 시 ASR_TEXT, BYE_EXIST 갱신."""
+    """Whisper를 비동기로 실행."""
     global ASR_TASK_STARTED, ASR_TASK_RUNNING
     if ASR_TASK_RUNNING:
         return
@@ -408,25 +409,19 @@ def state_transition(current_state: State) -> State:
         return State.IDLE if not FACE_DETECTED else State.ENROLL
 
     elif current_state == State.WELCOME:
-        # 타이머가 끝나지 않았으면 WELCOME 유지
         if not (time.time() > sh_timer_end):
             return State.WELCOME
-        # 타이머 끝남: 녹음이 끝났으면 ASR로, 녹음 진행 중이면 WELCOME 유지, (실패/미시작)면 IDLE
         if VAD:
             return State.ASR
         if VAD_TASK_RUNNING:
             return State.WELCOME
-        # 녹음이 안 시작/실패한 경우엔 대기 종료 -> IDLE
         return State.IDLE
 
     elif current_state == State.ASR:
-        # ASR 진행 중이면 ASR 유지
         if ASR_TASK_RUNNING:
             return State.ASR
-        # ASR이 끝났다면 결과에 따라 BYE / IDLE
         if ASR_TASK_STARTED and not ASR_TASK_RUNNING:
             return State.BYE if BYE_EXIST else State.IDLE
-        # 아직 시작 조건(오디오 미존재 등) 미충족 시 ASR 유지
         return State.ASR
 
     elif current_state == State.BYE:
@@ -451,25 +446,23 @@ def call_state_fn(state: State, key):
 
 
 # =========================
-# Model Init
+# Model Init (캐시 사용)
 # =========================
 
-print("Loading models...")
-resnet = InceptionResnetV1(pretrained='vggface2').eval()
-mp_face_detection = mp.solutions.face_detection
-face_detection = mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
+print("Loading models (cached)...")
+resnet = get_facenet_model()
+face_detection = get_face_detector()
+whisper_model = get_whisper_model("base")
 preprocess = transforms.Compose([
         transforms.Resize((160, 160)), transforms.ToTensor(),
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
 ])
 name_list, group_list, embeddings = load_db()
-print("Models loaded.")
+print("Models loaded (using cache).")
 
 # =========================
 # Streamlit UI & Main Loop
 # =========================
-
-import streamlit as st
 
 st.set_page_config(page_title="Face Kiosk", layout="wide")
 st.title("👤 Face Kiosk with State UI")
@@ -537,7 +530,6 @@ def ui_enroll_submit(new_name: str, new_group: str):
 
     name_list.append(new_name)
     group_list.append(new_group)
-
     if embeddings.size:
         embeddings = np.vstack([embeddings, sh_embedding])
     else:
@@ -599,7 +591,6 @@ if run:
                     st.info("알 수 없는 사용자입니다. 아래 폼으로 등록을 진행하세요.")
                     enroll_face_ph = st.empty()
 
-                    # 고유 키 사용
                     with st.form(key=current_enroll_form_key, clear_on_submit=False):
                         new_name = st.text_input("이름", key=current_enroll_name_key)
                         new_group = st.text_input("그룹(선택)", key=current_enroll_group_key)
@@ -614,13 +605,14 @@ if run:
                     enroll_face_ph.image(face_rgb, caption="등록할 얼굴", use_container_width=True)
                 else:
                     enroll_face_ph.warning("얼굴이 감지되지 않았습니다. 카메라를 향해 한 명만 비춰주세요.")
+
         else:
-            # Leaving ENROLL -> flag reset (폼은 숨겨져 있지만 같은 run 내 재생성 방지용으로 키를 바꿔서 다음 진입 시 새 폼 생성)
+            # Leaving ENROLL -> flag reset
             if ENROLL_UI_BUILT:
                 ENROLL_UI_BUILT = False
                 enroll_face_ph = None
 
-        # WELCOME UI 추가 부분 (녹음 진행중 표시)
+        # WELCOME UI (녹음 진행상태)
         if current_state == State.WELCOME:
             with welcome_slot.container():
                 if not (time.time() > sh_timer_end):
@@ -635,7 +627,7 @@ if run:
                     else:
                         st.warning("녹음을 시작하지 못했습니다. 돌아갑니다.")
 
-        # ASR UI 추가 부분 (ASR 진행중 표시)
+        # ASR UI (진행상태)
         if current_state == State.ASR:
             with asr_slot.container():
                 if ASR_TASK_RUNNING:
@@ -662,7 +654,6 @@ if run:
             st.error("프레임을 읽지 못했습니다.")
             break
 
-        # Key (kept for compatibility; not used for enroll)
         key = cv2.waitKey(1) & 0xFF
 
         # Call & transition
@@ -670,39 +661,35 @@ if run:
         call_state_fn(state, key)
         new_state = state_transition(state)
 
-        # 메인 루프에서 상태 변경 처리 부분만 교체/확장
         if new_state != state:
             print(f"State Change: {state.name} -> {new_state.name}")
 
-            # ENROLL로 들어올 때: 등록 관련 초기화
+            # ENROLL로 진입 시: 고유 키 생성 + 초기화
             if new_state == State.ENROLL and state != State.ENROLL:
                 ENROLL_SUCCESS = False
                 USER_EXIST = False
-                ENROLL_UI_BUILT = False  # 새 ENROLL 세션에서 폼 1회 생성
-
-                # 고유 키 생성 (중복 방지)
+                ENROLL_UI_BUILT = False
                 enroll_form_counter += 1
                 current_enroll_form_key = f"form_enroll_{enroll_form_counter}"
                 current_enroll_name_key = f"enroll_name_{enroll_form_counter}"
                 current_enroll_group_key = f"enroll_group_{enroll_form_counter}"
 
-            # WELCOME로 들어올 때: 타이머/녹음 플래그 초기화
+            # WELCOME로 진입 시: 타이머/녹음 플래그 초기화
             if new_state == State.WELCOME:
-                sh_timer_end = time.time() + 2.0  # 2초 인사
-                # 녹음 비동기 상태 초기화
+                sh_timer_end = time.time() + 2.0
                 VAD = False
                 VAD_TASK_STARTED = False
                 VAD_TASK_RUNNING = False
                 sh_audio_file = None
 
-            # ASR로 들어올 때: ASR 비동기 상태 초기화
+            # ASR로 진입 시: ASR 비동기 초기화
             if new_state == State.ASR:
                 ASR_TEXT = None
                 BYE_EXIST = False
                 ASR_TASK_STARTED = False
                 ASR_TASK_RUNNING = False
 
-            # BYE로 들어올 때: bye 타이머
+            # BYE로 진입 시: 타이머
             if new_state == State.BYE:
                 sh_timer_end = time.time() + 2.0
 
@@ -713,7 +700,6 @@ if run:
 
         # Draw overlays
         display_frame = sh_frame.copy()
-
         if sh_bbox:
             x, y, w, h = sh_bbox
             cv2.rectangle(display_frame, (x, y), (x + w, y + h), sh_color, 2)
@@ -723,7 +709,6 @@ if run:
             cv2.putText(display_frame, sh_message, (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, sh_color, 2)
 
-        # Show frame
         frame_rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
         h0, w0, _ = frame_rgb.shape
         new_h = int(h0 * (width / w0))
@@ -733,14 +718,17 @@ if run:
         # Debug info
         with debug_slot:
             st.write({
-                    "FACE_DETECTED" : FACE_DETECTED,
-                    "USER_EXIST"    : USER_EXIST,
-                    "ENROLL_SUCCESS": ENROLL_SUCCESS,
-                    "VAD"           : VAD,
-                    "BYE_EXIST"     : BYE_EXIST,
-                    "TIMER_EXPIRED" : TIMER_EXPIRED,
-                    "current_user"  : sh_current_user,
-                    "audio_file"    : sh_audio_file
+                    "FACE_DETECTED"     : FACE_DETECTED,
+                    "USER_EXIST"        : USER_EXIST,
+                    "ENROLL_SUCCESS"    : ENROLL_SUCCESS,
+                    "VAD"               : VAD,
+                    "BYE_EXIST"         : BYE_EXIST,
+                    "TIMER_EXPIRED"     : TIMER_EXPIRED,
+                    "current_user"      : sh_current_user,
+                    "audio_file"        : sh_audio_file,
+                    "id(whisper_model)" : id(whisper_model),
+                    "id(resnet)"        : id(resnet),
+                    "id(face_detection)": id(face_detection),
             })
 
         time.sleep(0.01)
