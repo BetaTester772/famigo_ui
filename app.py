@@ -16,7 +16,9 @@ import mediapipe as mp
 import streamlit as st
 from facenet_pytorch import InceptionResnetV1
 
+temp_audio_dir = "audio"
 ssl._create_default_https_context = ssl._create_unverified_context  # (torch.hub SSL 회피용)
+os.makedirs(temp_audio_dir, exist_ok=True)
 
 
 # =========================
@@ -87,7 +89,7 @@ class VADRecorder:
         if len(segment) / self.SAMPLE_RATE < self.MIN_DURATION:
             print("Segment too short, skipping save.")
             return
-        filename = f"audio/speech_{time.strftime('%Y%m%d_%H%M%S')}.wav"
+        filename = f"{temp_audio_dir}/speech_{time.strftime('%Y%m%d_%H%M%S')}.wav"
         sf.write(filename, segment, self.SAMPLE_RATE)
         print(f"Audio saved: {filename}")
         self.saved_filename = filename
