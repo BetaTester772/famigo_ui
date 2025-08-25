@@ -197,7 +197,7 @@ sh_tts_file = None
 sh_message = "Initializing..."
 sh_color = (255, 255, 0)
 sh_timer_end = 0
-sh_prev_unkonw = None
+# sh_prev_unkown = None
 
 # ❗ 세션 한정 그룹명 (WELCOME~BYE 사이 메모리 보관)
 sh_session_group = None
@@ -211,7 +211,7 @@ ASR_TEXT = None
 
 # DB / threshold
 DB_PATH = "faces_db.npy"
-SIM_THRESHOLD = 0.65
+SIM_THRESHOLD = 0.5
 
 # BBOX smoothing
 BBOX_AVG_N = 5
@@ -476,7 +476,7 @@ def start_asr_async(file_path: str):
 # Transitions & Dispatcher
 # =========================
 def state_transition(current_state: State) -> State:
-    global sh_prev_unkonw, sh_embedding, name_list, embeddings
+    global sh_embedding, name_list, embeddings  # ,sh_prev_unkown
 
     if current_state == State.IDLE:
         return State.USER_CHECK if FACE_DETECTED else State.IDLE
@@ -492,7 +492,7 @@ def state_transition(current_state: State) -> State:
             name_list, embeddings = load_db()
             # USER_CHECK로 돌아가 group 입력
             return State.USER_CHECK
-        sh_prev_unkonw = sh_embedding
+        # sh_prev_unkown = sh_embedding
         return State.IDLE if not FACE_DETECTED else State.ENROLL
 
     elif current_state == State.WELCOME:

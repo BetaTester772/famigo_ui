@@ -2,6 +2,8 @@
 #    uv pip compile pyproject.toml -o requirements.txt
 absl-py==2.3.1
     # via mediapipe
+addict==2.4.0
+    # via misaki
 aioice==0.10.1
     # via
     #   aiortc
@@ -10,19 +12,32 @@ aiortc==1.13.0
     # via streamlit-webrtc
 altair==5.5.0
     # via streamlit
+annotated-types==0.7.0
+    # via pydantic
 attrs==25.3.0
     # via
+    #   csvw
     #   jsonschema
     #   mediapipe
+    #   phonemizer-fork
     #   referencing
 av==14.4.0
     # via
     #   famigo-ui (pyproject.toml)
     #   aiortc
+babel==2.17.0
+    # via csvw
 blinker==1.9.0
     # via streamlit
+blis==1.3.0
+    # via thinc
 cachetools==6.1.0
     # via streamlit
+catalogue==2.0.10
+    # via
+    #   spacy
+    #   srsly
+    #   thinc
 certifi==2025.8.3
     # via requests
 cffi==1.17.1
@@ -35,37 +50,85 @@ cffi==1.17.1
 charset-normalizer==3.4.3
     # via requests
 click==8.2.1
-    # via streamlit
+    # via
+    #   streamlit
+    #   typer
+cloudpathlib==0.21.1
+    # via weasel
+colorama==0.4.6
+    # via csvw
+confection==0.1.5
+    # via
+    #   thinc
+    #   weasel
 contourpy==1.3.2
     # via matplotlib
 cryptography==45.0.6
     # via
     #   aiortc
     #   pyopenssl
+csvw==3.5.1
+    # via segments
+curated-tokenizers==0.0.9
+    # via spacy-curated-transformers
+curated-transformers==0.1.1
+    # via spacy-curated-transformers
 cycler==0.12.1
     # via matplotlib
+cymem==2.0.11
+    # via
+    #   preshed
+    #   spacy
+    #   thinc
+cython==3.1.3
+    # via famigo-ui (pyproject.toml)
+dlinfo==2.0.0
+    # via phonemizer-fork
 dnspython==2.7.0
     # via aioice
+docopt==0.6.2
+    # via num2words
+en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+    # via famigo-ui (pyproject.toml)
+espeakng-loader==0.2.4
+    # via misaki
 facenet-pytorch==2.5.3
     # via famigo-ui (pyproject.toml)
 filelock==3.19.1
-    # via torch
+    # via
+    #   huggingface-hub
+    #   torch
+    #   transformers
 flatbuffers==25.2.10
     # via mediapipe
 fonttools==4.59.1
     # via matplotlib
 fsspec==2025.7.0
-    # via torch
+    # via
+    #   huggingface-hub
+    #   torch
 gitdb==4.0.12
     # via gitpython
 gitpython==3.1.45
     # via streamlit
 google-crc32c==1.7.1
     # via aiortc
+hf-xet==1.1.8
+    # via huggingface-hub
+huggingface-hub==0.34.4
+    # via
+    #   famigo-ui (pyproject.toml)
+    #   kokoro
+    #   tokenizers
+    #   transformers
 idna==3.10
     # via requests
 ifaddr==0.2.0
     # via aioice
+isodate==0.7.2
+    # via
+    #   csvw
+    #   rdflib
 jax==0.6.2
     # via mediapipe
 jaxlib==0.6.2
@@ -76,21 +139,44 @@ jinja2==3.1.6
     # via
     #   altair
     #   pydeck
+    #   spacy
     #   torch
+joblib==1.5.1
+    # via phonemizer-fork
 jsonschema==4.25.1
-    # via altair
+    # via
+    #   altair
+    #   csvw
 jsonschema-specifications==2025.4.1
     # via jsonschema
 kiwisolver==1.4.9
     # via matplotlib
+kokoro==0.9.4
+    # via famigo-ui (pyproject.toml)
+langcodes==3.5.0
+    # via spacy
+language-data==1.3.0
+    # via langcodes
+language-tags==1.2.0
+    # via csvw
 llvmlite==0.44.0
     # via numba
+loguru==0.7.3
+    # via kokoro
+marisa-trie==1.3.0
+    # via language-data
+markdown-it-py==4.0.0
+    # via rich
 markupsafe==3.0.2
     # via jinja2
 matplotlib==3.10.5
     # via mediapipe
+mdurl==0.1.2
+    # via markdown-it-py
 mediapipe==0.10.14
     # via famigo-ui (pyproject.toml)
+misaki==0.9.4
+    # via kokoro
 ml-dtypes==0.5.3
     # via
     #   jax
@@ -99,19 +185,28 @@ more-itertools==10.7.0
     # via openai-whisper
 mpmath==1.3.0
     # via sympy
+murmurhash==1.0.13
+    # via
+    #   preshed
+    #   spacy
+    #   thinc
 narwhals==2.2.0
     # via altair
 networkx==3.4.2
     # via torch
+num2words==0.5.14
+    # via misaki
 numba==0.61.2
     # via openai-whisper
 numpy==2.2.6
     # via
     #   famigo-ui (pyproject.toml)
+    #   blis
     #   contourpy
     #   facenet-pytorch
     #   jax
     #   jaxlib
+    #   kokoro
     #   matplotlib
     #   mediapipe
     #   ml-dtypes
@@ -123,8 +218,11 @@ numpy==2.2.6
     #   pydeck
     #   scipy
     #   soundfile
+    #   spacy
     #   streamlit
+    #   thinc
     #   torchvision
+    #   transformers
 openai-whisper==20250625
     # via famigo-ui (pyproject.toml)
 opencv-contrib-python==4.12.0.88
@@ -136,11 +234,18 @@ opt-einsum==3.4.0
 packaging==25.0
     # via
     #   altair
+    #   huggingface-hub
     #   matplotlib
+    #   spacy
     #   streamlit
     #   streamlit-webrtc
+    #   thinc
+    #   transformers
+    #   weasel
 pandas==2.3.2
     # via streamlit
+phonemizer-fork==3.3.2
+    # via misaki
 pillow==11.3.0
     # via
     #   famigo-ui (pyproject.toml)
@@ -148,6 +253,14 @@ pillow==11.3.0
     #   matplotlib
     #   streamlit
     #   torchvision
+pip==25.2
+    # via famigo-ui (pyproject.toml)
+playsound3==3.2.6
+    # via famigo-ui (pyproject.toml)
+preshed==3.0.10
+    # via
+    #   spacy
+    #   thinc
 protobuf==4.25.8
     # via
     #   mediapipe
@@ -156,43 +269,89 @@ pyarrow==21.0.0
     # via streamlit
 pycparser==2.22
     # via cffi
+pydantic==2.11.7
+    # via
+    #   confection
+    #   spacy
+    #   thinc
+    #   weasel
+pydantic-core==2.33.2
+    # via pydantic
 pydeck==0.9.1
     # via streamlit
 pyee==13.0.0
     # via aiortc
+pygments==2.19.2
+    # via rich
 pylibsrtp==0.12.0
     # via aiortc
 pyopenssl==25.1.0
     # via aiortc
 pyparsing==3.2.3
-    # via matplotlib
+    # via
+    #   matplotlib
+    #   rdflib
 python-dateutil==2.9.0.post0
     # via
+    #   csvw
     #   matplotlib
     #   pandas
 pytz==2025.2
     # via pandas
+pyyaml==6.0.2
+    # via
+    #   huggingface-hub
+    #   transformers
+rdflib==7.1.4
+    # via csvw
 referencing==0.36.2
     # via
     #   jsonschema
     #   jsonschema-specifications
 regex==2025.7.34
-    # via tiktoken
+    # via
+    #   curated-tokenizers
+    #   misaki
+    #   segments
+    #   tiktoken
+    #   transformers
 requests==2.32.5
     # via
+    #   csvw
     #   facenet-pytorch
+    #   huggingface-hub
+    #   spacy
     #   streamlit
     #   tiktoken
+    #   transformers
+    #   weasel
+rfc3986==1.5.0
+    # via csvw
+rich==14.1.0
+    # via typer
 rpds-py==0.27.0
     # via
     #   jsonschema
     #   referencing
+safetensors==0.6.2
+    # via transformers
 scipy==1.15.3
     # via
     #   jax
     #   jaxlib
+segments==2.3.0
+    # via phonemizer-fork
+setuptools==80.9.0
+    # via
+    #   famigo-ui (pyproject.toml)
+    #   spacy
+    #   thinc
+shellingham==1.5.4
+    # via typer
 six==1.17.0
     # via python-dateutil
+smart-open==7.3.0.post1
+    # via weasel
 smmap==5.0.2
     # via gitdb
 sounddevice==0.5.2
@@ -201,8 +360,22 @@ sounddevice==0.5.2
     #   mediapipe
 soundfile==0.13.1
     # via famigo-ui (pyproject.toml)
+spacy==3.8.7
+    # via misaki
+spacy-curated-transformers==0.3.1
+    # via misaki
+spacy-legacy==3.0.12
+    # via spacy
+spacy-loggers==1.0.5
+    # via spacy
 sqlalchemy==2.0.43
     # via famigo-ui (pyproject.toml)
+srsly==2.5.1
+    # via
+    #   confection
+    #   spacy
+    #   thinc
+    #   weasel
 streamlit==1.48.1
     # via
     #   famigo-ui (pyproject.toml)
@@ -213,14 +386,21 @@ sympy==1.14.0
     # via torch
 tenacity==9.1.2
     # via streamlit
+thinc==8.3.6
+    # via spacy
 tiktoken==0.11.0
     # via openai-whisper
+tokenizers==0.21.4
+    # via transformers
 toml==0.10.2
     # via streamlit
 torch==2.8.0
     # via
     #   famigo-ui (pyproject.toml)
+    #   curated-transformers
+    #   kokoro
     #   openai-whisper
+    #   spacy-curated-transformers
     #   torchaudio
     #   torchvision
 torchaudio==2.8.0
@@ -232,19 +412,51 @@ torchvision==0.23.0
 tornado==6.5.2
     # via streamlit
 tqdm==4.67.1
-    # via openai-whisper
+    # via
+    #   huggingface-hub
+    #   openai-whisper
+    #   spacy
+    #   transformers
+transformers==4.55.4
+    # via kokoro
+typer==0.16.1
+    # via
+    #   spacy
+    #   weasel
 typing-extensions==4.14.1
     # via
     #   altair
+    #   cloudpathlib
+    #   huggingface-hub
+    #   phonemizer-fork
+    #   pydantic
+    #   pydantic-core
     #   pyee
     #   pyopenssl
     #   referencing
     #   sqlalchemy
     #   streamlit
     #   torch
+    #   typer
+    #   typing-inspection
+typing-inspection==0.4.1
+    # via pydantic
 tzdata==2025.2
     # via pandas
+uritemplate==4.2.0
+    # via csvw
 urllib3==2.5.0
     # via requests
+wasabi==1.1.3
+    # via
+    #   spacy
+    #   thinc
+    #   weasel
 watchdog==6.0.0
     # via famigo-ui (pyproject.toml)
+weasel==0.4.1
+    # via spacy
+wheel==0.45.1
+    # via famigo-ui (pyproject.toml)
+wrapt==1.17.3
+    # via smart-open
