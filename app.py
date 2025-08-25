@@ -11,9 +11,20 @@ import sounddevice as sd
 from collections import deque
 import time
 import soundfile as sf
+import threading
+
+# ====== 전역 플래그 추가 ======
+VAD_TASK_STARTED = False
+VAD_TASK_RUNNING = False
+
+ASR_TASK_STARTED = False
+ASR_TASK_RUNNING = False
+ASR_TEXT = None
 
 import ssl
+
 ssl._create_default_https_context = ssl._create_unverified_context
+
 
 # =========================
 # VAD Recorder
@@ -223,6 +234,7 @@ def update_face_detection():
 # =========================
 
 import whisper
+
 whisper_model = whisper.load_model("large-v3")
 
 
@@ -298,29 +310,24 @@ def enter_welcome():
 
     update_face_detection()
 
-    TIMER_EXPIRED = False
-    VAD = False
+    # 메시지/색상
     sh_message = f"Hi, {sh_current_user}!"
     sh_color = (0, 255, 0)
 
-    if time.time() > sh_timer_end:
-        TIMER_EXPIRED = True
-        sh_audio_file = listen_and_record_speech(timeout=5)
-        if sh_audio_file:
-            VAD = True
+    # 타이머 만료 여부를 매 프레임 계산
+    TIMER_EXPIRED = (time.time() > sh_timer_end)
+
+    # 타이머가 끝났고, 아직 녹음 시작 안 했으면 비동기 시작
+    if TIMER_EXPIRED and not VAD_TASK_STARTED:
+        start_vad_async(timeout=5)
 
 
 def enter_asr():
-    global BYE_EXIST
-
     update_face_detection()
 
-    text = asr_from_wav(sh_audio_file)
-    text = "".join(text.split())
-    if "잘가" in text or "bye" in text.lower():
-        BYE_EXIST = True
-    else:
-        BYE_EXIST = False
+    # 오디오가 있고, 아직 ASR 시작 안 했으면 비동기 시작
+    if sh_audio_file and not ASR_TASK_STARTED:
+        start_asr_async(sh_audio_file)
 
 
 def enter_bye():
@@ -334,6 +341,50 @@ def enter_bye():
 
     if time.time() > sh_timer_end:
         TIMER_EXPIRED = True
+
+
+def start_vad_async(timeout=5):
+    """녹음을 비동기로 시작한다. 완료 시 sh_audio_file, VAD 갱신."""
+    global VAD_TASK_STARTED, VAD_TASK_RUNNING
+    if VAD_TASK_RUNNING:  # 이미 실행 중
+        return
+    VAD_TASK_STARTED = True
+    VAD_TASK_RUNNING = True
+
+    def _worker():
+        global sh_audio_file, VAD, VAD_TASK_RUNNING
+        try:
+            filename = listen_and_record_speech(timeout=timeout)
+            if filename:
+                sh_audio_file = filename
+                VAD = True
+            else:
+                VAD = False
+        finally:
+            VAD_TASK_RUNNING = False
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+def start_asr_async(file_path: str):
+    """Whisper를 비동기로 실행한다. 완료 시 ASR_TEXT, BYE_EXIST 갱신."""
+    global ASR_TASK_STARTED, ASR_TASK_RUNNING
+    if ASR_TASK_RUNNING:
+        return
+    ASR_TASK_STARTED = True
+    ASR_TASK_RUNNING = True
+
+    def _worker():
+        global ASR_TEXT, BYE_EXIST, ASR_TASK_RUNNING
+        try:
+            text = asr_from_wav(file_path)
+            ASR_TEXT = text
+            t = "".join(text.split())
+            BYE_EXIST = ("잘가" in t) or ("bye" in t.lower())
+        finally:
+            ASR_TASK_RUNNING = False
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 # =========================
@@ -350,21 +401,33 @@ def state_transition(current_state: State) -> State:
         return State.WELCOME if USER_EXIST else State.ENROLL
 
     elif current_state == State.ENROLL:
-        # ENROLL 성공 시 WELCOME
         if ENROLL_SUCCESS:
-            print("[Enroll Success] Reloading DB...")
             name_list, group_list, embeddings = load_db()
             return State.WELCOME
         sh_prev_unkonw = sh_embedding
         return State.IDLE if not FACE_DETECTED else State.ENROLL
 
     elif current_state == State.WELCOME:
-        if TIMER_EXPIRED:
-            return State.ASR if VAD else State.IDLE
-        return State.WELCOME
+        # 타이머가 끝나지 않았으면 WELCOME 유지
+        if not (time.time() > sh_timer_end):
+            return State.WELCOME
+        # 타이머 끝남: 녹음이 끝났으면 ASR로, 녹음 진행 중이면 WELCOME 유지, (실패/미시작)면 IDLE
+        if VAD:
+            return State.ASR
+        if VAD_TASK_RUNNING:
+            return State.WELCOME
+        # 녹음이 안 시작/실패한 경우엔 대기 종료 -> IDLE
+        return State.IDLE
 
     elif current_state == State.ASR:
-        return State.BYE if BYE_EXIST else State.IDLE
+        # ASR 진행 중이면 ASR 유지
+        if ASR_TASK_RUNNING:
+            return State.ASR
+        # ASR이 끝났다면 결과에 따라 BYE / IDLE
+        if ASR_TASK_STARTED and not ASR_TASK_RUNNING:
+            return State.BYE if BYE_EXIST else State.IDLE
+        # 아직 시작 조건(오디오 미존재 등) 미충족 시 ASR 유지
+        return State.ASR
 
     elif current_state == State.BYE:
         return State.IDLE if TIMER_EXPIRED else State.BYE
@@ -438,10 +501,12 @@ with col_ui:
 if "cap" not in st.session_state:
     st.session_state.cap = None
 
+
 def open_camera(index: int, target_w: int):
     cap = cv2.VideoCapture(index)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, target_w)
     return cap
+
 
 # ENROLL UI lifecycle flags & unique keys
 ENROLL_UI_BUILT = False
@@ -454,6 +519,7 @@ current_enroll_group_key = None
 # Initial state
 state = State.IDLE
 st.caption("Starting state machine...")
+
 
 # ENROLL submit helper
 def ui_enroll_submit(new_name: str, new_group: str):
@@ -495,6 +561,7 @@ if run:
             st.error("카메라를 열 수 없습니다. 인덱스를 바꾸거나 다른 앱을 종료해보세요.")
             st.stop()
 
+
     # UI helper: render state panel
     def render_state_panel(current_state: State):
         global ENROLL_UI_BUILT, enroll_face_ph
@@ -519,6 +586,13 @@ if run:
 
         # ENROLL UI (form created once per entry)
         if current_state == State.ENROLL:
+            # 안전장치: 혹시 키가 None이면 즉석 생성
+            if current_enroll_form_key is None or current_enroll_name_key is None or current_enroll_group_key is None:
+                ts = int(time.time() * 1000)
+                current_enroll_form_key = f"form_enroll_{ts}"
+                current_enroll_name_key = f"enroll_name_{ts}"
+                current_enroll_group_key = f"enroll_group_{ts}"
+
             if not ENROLL_UI_BUILT:
                 ENROLL_UI_BUILT = True
                 with enroll_slot.container():
@@ -546,22 +620,31 @@ if run:
                 ENROLL_UI_BUILT = False
                 enroll_face_ph = None
 
-        # WELCOME UI
+        # WELCOME UI 추가 부분 (녹음 진행중 표시)
         if current_state == State.WELCOME:
             with welcome_slot.container():
-                st.success(f"Hi, **{sh_current_user}**! 잠시 후 음성 녹음을 시작합니다.")
-                remain = max(0.0, sh_timer_end - time.time())
-                pct = min(max(1.0 - (remain / 2.0), 0.0), 1.0)
-                st.progress(pct, text="Greeting...")
+                if not (time.time() > sh_timer_end):
+                    remain = max(0.0, sh_timer_end - time.time())
+                    st.success(f"Hi, **{sh_current_user}**! 곧 녹음을 시작합니다.")
+                    st.progress(min(max(1.0 - (remain / 2.0), 0.0), 1.0), text="Greeting...")
+                else:
+                    if VAD_TASK_RUNNING:
+                        st.info("🎙️ 음성 녹음 중...")
+                    elif VAD:
+                        st.success("🎧 음성 캡처 완료! ASR로 이동합니다.")
+                    else:
+                        st.warning("녹음을 시작하지 못했습니다. 돌아갑니다.")
 
-        # ASR UI
+        # ASR UI 추가 부분 (ASR 진행중 표시)
         if current_state == State.ASR:
             with asr_slot.container():
-                st.info("음성 인식 결과")
-                if sh_audio_file:
-                    audio_slot.audio(sh_audio_file)
-                    st.write("녹음 파일 재생 가능")
-                st.write(f"**BYE detected:** {'Yes' if BYE_EXIST else 'No'}")
+                if ASR_TASK_RUNNING:
+                    st.info("🧠 Whisper로 음성을 변환 중...")
+                elif ASR_TEXT is not None:
+                    st.write("**ASR 결과:** ", ASR_TEXT)
+                    st.write(f"**BYE detected:** {'Yes' if BYE_EXIST else 'No'}")
+                else:
+                    st.write("대기 중...")
 
         # BYE UI
         if current_state == State.BYE:
@@ -570,6 +653,7 @@ if run:
                 remain = max(0.0, sh_timer_end - time.time())
                 pct = min(max(1.0 - (remain / 2.0), 0.0), 1.0)
                 st.progress(pct, text="Ending...")
+
 
     # Main loop
     while run:
@@ -586,24 +670,43 @@ if run:
         call_state_fn(state, key)
         new_state = state_transition(state)
 
+        # 메인 루프에서 상태 변경 처리 부분만 교체/확장
         if new_state != state:
             print(f"State Change: {state.name} -> {new_state.name}")
 
-            # ENROLL에 '진입'할 때만 초기화 및 고유 키 생성
-            if new_state == State.ENROLL and previous_state != State.ENROLL:
+            # ENROLL로 들어올 때: 등록 관련 초기화
+            if new_state == State.ENROLL and state != State.ENROLL:
                 ENROLL_SUCCESS = False
                 USER_EXIST = False
-                ENROLL_UI_BUILT = False  # 새 ENROLL 세션에서 폼 1회 생성하도록
+                ENROLL_UI_BUILT = False  # 새 ENROLL 세션에서 폼 1회 생성
+
+                # 고유 키 생성 (중복 방지)
                 enroll_form_counter += 1
                 current_enroll_form_key = f"form_enroll_{enroll_form_counter}"
                 current_enroll_name_key = f"enroll_name_{enroll_form_counter}"
                 current_enroll_group_key = f"enroll_group_{enroll_form_counter}"
 
+            # WELCOME로 들어올 때: 타이머/녹음 플래그 초기화
+            if new_state == State.WELCOME:
+                sh_timer_end = time.time() + 2.0  # 2초 인사
+                # 녹음 비동기 상태 초기화
+                VAD = False
+                VAD_TASK_STARTED = False
+                VAD_TASK_RUNNING = False
+                sh_audio_file = None
+
+            # ASR로 들어올 때: ASR 비동기 상태 초기화
+            if new_state == State.ASR:
+                ASR_TEXT = None
+                BYE_EXIST = False
+                ASR_TASK_STARTED = False
+                ASR_TASK_RUNNING = False
+
+            # BYE로 들어올 때: bye 타이머
+            if new_state == State.BYE:
+                sh_timer_end = time.time() + 2.0
+
             state = new_state
-            if state == State.WELCOME:
-                sh_timer_end = time.time() + 2.0  # greeting 2s
-            elif state == State.BYE:
-                sh_timer_end = time.time() + 2.0  # bye 2s
 
         # Update state panel
         render_state_panel(state)
