@@ -199,7 +199,7 @@ sh_color = (255, 255, 0)
 sh_timer_end = 0
 sh_prev_unkonw = None
 
-# ❗ 세션 한정 그룹명 (WELCOME~BYE 사이 메모리 보관)
+# ❗ 세션 한정 그룹명 (USER_CHECK에서 입력, BYE까지 유지)
 sh_session_group = None
 
 # async flags
@@ -208,6 +208,10 @@ VAD_TASK_RUNNING = False
 ASR_TASK_STARTED = False
 ASR_TASK_RUNNING = False
 ASR_TEXT = None
+
+if "_epoch" not in st.session_state:
+    st.session_state["_epoch"] = 0
+st.session_state["_epoch"] += 1
 
 # DB / threshold
 DB_PATH = "faces_db.npy"
@@ -482,16 +486,13 @@ def state_transition(current_state: State) -> State:
         return State.USER_CHECK if FACE_DETECTED else State.IDLE
 
     elif current_state == State.USER_CHECK:
-        if USER_EXIST:
-            return State.WELCOME if sh_session_group else State.USER_CHECK
-        else:
-            return State.ENROLL
+        return State.WELCOME if USER_EXIST else State.ENROLL
 
     elif current_state == State.ENROLL:
         if ENROLL_SUCCESS:
+            # DB 재로딩 (새 스키마)
             name_list, embeddings = load_db()
-            # USER_CHECK로 돌아가 group 입력
-            return State.USER_CHECK
+            return State.WELCOME
         sh_prev_unkonw = sh_embedding
         return State.IDLE if not FACE_DETECTED else State.ENROLL
 
@@ -565,45 +566,21 @@ with col_video:
     cam_index = st.number_input("Camera index", min_value=0, max_value=10, value=0, step=1)
     width = st.slider("Frame width", 320, 1920, 640, step=10)
     bbox_avg_n_ui = st.slider("BBOX smoothing (frames)", 1, 30, 5, help="Average the face bbox over N frames.")
-    run = st.toggle("Run camera", value=True)
+    run = st.toggle("Run camera", value=False)
     frame_slot = st.empty()
 
 # UI placeholders
 with col_ui:
-    st.subheader("🔖 Group")
-    group_ui = st.empty()  # ← 그룹 입력 전용 placeholder
     st.subheader("🧭 State Panel")
     state_badge = st.empty()
     message_slot = st.empty()
-    usercheck_slot = st.empty()
+    user_check_slot = st.empty()  # USER_CHECK용 슬롯 추가
     enroll_slot = st.empty()
     welcome_slot = st.empty()
     asr_slot = st.empty()
     bye_slot = st.empty()
     audio_slot = st.empty()
     debug_slot = st.expander("Debug", expanded=False)
-
-if "group_key_counter" not in st.session_state:
-    st.session_state.group_key_counter = 1
-
-if "current_group_key" not in st.session_state:
-    st.session_state.current_group_key = f"usercheck_group_input_{st.session_state.group_key_counter}"
-
-# 👇 그룹 입력창: 루프 바깥에서 단 1회만 생성
-with group_ui.container():
-    _gkey = st.session_state.current_group_key
-    _gval = (st.session_state.get(_gkey, "") or "").strip()
-
-    st.text_input(
-            "그룹명 (BYE 후에만 다시 입력)",
-            key=_gkey,  # ← 현재 키만 사용
-            placeholder="예: slpr",
-            disabled=bool(_gval),  # 값이 있으면 잠금
-    )
-    st.caption(f"현재 그룹: {_gval or '-'}")
-
-GROUP_INPUT_COUNTER = 0  # 고정: 카운터
-CURRENT_GROUP_KEY = None  # 현재 프레임에서 사용할 user_key
 
 # Keep only camera handle in session_state
 if "cap" not in st.session_state:
@@ -623,15 +600,10 @@ enroll_form_counter = 0
 current_enroll_form_key = None
 current_enroll_name_key = None
 
-# WELCOME 그룹 입력용 고유 키
-WELCOME_KEY = None
-WELCOME_KEY_COUNTER = 0
-
-# WELCOME UI 1회 생성 가드 & 플레이스홀더
-WELCOME_UI_BUILT = False
-welcome_group_ph = None
-welcome_status_ph = None
-welcome_progress_ph = None
+# USER_CHECK 그룹 입력용 고유 키 (enroll_counter 방법 참고)
+USER_CHECK_UI_BUILT = False
+user_check_counter = 0
+current_group_input_key = None
 
 # Initial state
 state = State.IDLE
@@ -670,16 +642,13 @@ def ui_enroll_submit(new_name: str):
 
 # UI render helper
 def render_state_panel(current_state: State):
-    global ENROLL_UI_BUILT, enroll_face_ph, current_enroll_name_key, current_enroll_form_key
-    global current_usercheck_key, usercheck_form_counter, sh_session_group  # ← 정리
+    global ENROLL_UI_BUILT, enroll_face_ph, USER_CHECK_UI_BUILT, sh_session_group
 
     state_badge.markdown(f"**Current State:** :blue[{current_state.name}]")
 
-    # 상태별 슬롯 정리
+    # clear unrelated slots
     if current_state != State.USER_CHECK:
-        if usercheck_slot is not None:
-            usercheck_slot.empty()
-
+        user_check_slot.empty()
     if current_state != State.ENROLL:
         enroll_slot.empty()
     if current_state != State.WELCOME:
@@ -692,29 +661,59 @@ def render_state_panel(current_state: State):
     with message_slot.container():
         st.markdown(f"**Message:** {sh_message}")
 
-    # ---------- USER_CHECK ----------
+    # USER_CHECK: 그룹명 입력 (DB 저장 안 함, 세션 유지)
     if current_state == State.USER_CHECK:
-        with usercheck_slot.container():
-            st.info("사용자 확인 중입니다. 위의 ‘그룹명’ 입력창에 입력하세요. (BYE 전까지 유지)")
+        # unique key 준비 (enroll 방식과 동일)
+        if current_group_input_key is None:
+            ts = int(time.time() * 1000)
+            globals()['current_group_input_key'] = f"group_input_{ts}"
 
-    # ---------- ENROLL ----------
+        if not USER_CHECK_UI_BUILT:
+            globals()['USER_CHECK_UI_BUILT'] = True
+            with user_check_slot.container():
+                if USER_EXIST:
+                    st.success(f"사용자 인식: **{sh_current_user}**")
+                    st.info("그룹명을 입력하세요 (선택사항, 세션 한정)")
+                else:
+                    st.warning("알 수 없는 사용자")
+                    st.info("그룹명을 입력하세요 (선택사항, 세션 한정)")
+
+                # 그룹 입력 위젯
+                group_input = st.text_input(
+                        "그룹명",
+                        value=sh_session_group or "",
+                        placeholder="예: slpr, team-a",
+                        key=current_group_input_key,
+                        help="이 정보는 DB에 저장되지 않으며, 현재 세션에서만 유지됩니다."
+                )
+
+                # 글로벌 세션 그룹 업데이트
+                globals()['sh_session_group'] = (group_input or "").strip() or None
+    else:
+        if USER_CHECK_UI_BUILT:
+            globals()['USER_CHECK_UI_BUILT'] = False
+
+    # ENROLL: 이름만 입력
     if current_state == State.ENROLL:
+        # ensure unique keys
         if current_enroll_form_key is None or current_enroll_name_key is None:
             ts = int(time.time() * 1000)
-            current_enroll_form_key = f"form_enroll_{ts}"
-            current_enroll_name_key = f"enroll_name_{ts}"
+            globals()['current_enroll_form_key'] = f"form_enroll_{ts}"
+            globals()['current_enroll_name_key'] = f"enroll_name_{ts}"
 
         if not ENROLL_UI_BUILT:
-            ENROLL_UI_BUILT = True
+            globals()['ENROLL_UI_BUILT'] = True
             with enroll_slot.container():
                 st.info("알 수 없는 사용자입니다. 아래 폼으로 등록을 진행하세요.")
                 globals()['enroll_face_ph'] = st.empty()
+
                 with st.form(key=current_enroll_form_key, clear_on_submit=False):
                     new_name = st.text_input("이름", key=current_enroll_name_key)
                     submitted = st.form_submit_button("등록하기", use_container_width=True)
                 if submitted:
                     ui_enroll_submit(new_name)
 
+        # face preview
         if enroll_face_ph is not None:
             if sh_face_crop is not None and sh_face_crop.size != 0:
                 face_rgb = cv2.cvtColor(sh_face_crop, cv2.COLOR_BGR2RGB)
@@ -723,17 +722,18 @@ def render_state_panel(current_state: State):
                 enroll_face_ph.warning("얼굴이 감지되지 않았습니다. 카메라를 향해 한 명만 비춰주세요.")
     else:
         if ENROLL_UI_BUILT:
-            ENROLL_UI_BUILT = False
+            globals()['ENROLL_UI_BUILT'] = False
             globals()['enroll_face_ph'] = None
 
-    # ---------- WELCOME ----------
+    # WELCOME: 그룹 정보 표시 (입력 안 받음)
     if current_state == State.WELCOME:
         with welcome_slot.container():
+            st.success(f"Hi, **{sh_current_user}**! 곧 녹음을 시작합니다.")
             if sh_session_group:
-                st.caption(f"(세션 그룹: {sh_session_group})")
+                st.info(f"그룹: **{sh_session_group}**")
+
             if not (time.time() > sh_timer_end):
                 remain = max(0.0, sh_timer_end - time.time())
-                st.success(f"Hi, **{sh_current_user}**! 곧 녹음을 시작합니다.")
                 st.progress(min(max(1.0 - (remain / 2.0), 0.0), 1.0), text="Greeting...")
             else:
                 if VAD_TASK_RUNNING:
@@ -743,7 +743,7 @@ def render_state_panel(current_state: State):
                 else:
                     st.warning("녹음을 시작하지 못했습니다. 돌아갑니다.")
 
-    # ---------- ASR ----------
+    # ASR: 진행상태/결과
     if current_state == State.ASR:
         with asr_slot.container():
             if ASR_TASK_RUNNING:
@@ -756,12 +756,12 @@ def render_state_panel(current_state: State):
             else:
                 st.write("대기 중...")
 
-    # ---------- BYE ----------
+    # BYE: 그룹 정보와 함께 표시
     if current_state == State.BYE:
         with bye_slot.container():
             st.warning(f"Bye, **{sh_current_user}**!")
             if sh_session_group:
-                st.caption(f"(세션 그룹: {sh_session_group})")
+                st.caption(f"(그룹: {sh_session_group})")
             remain = max(0.0, sh_timer_end - time.time())
             pct = min(max(1.0 - (remain / 2.0), 0.0), 1.0)
             st.progress(pct, text="Ending...")
@@ -791,15 +791,22 @@ if run:
 
         key = cv2.waitKey(1) & 0xFF
 
-        _gkey = st.session_state.current_group_key
-        sh_session_group = (st.session_state.get(_gkey, "") or "").strip() or None
-
         # state call + transition
         call_state_fn(state, key)
         new_state = state_transition(state)
 
         if new_state != state:
             print(f"State Change: {state.name} -> {new_state.name}")
+
+            # USER_CHECK로 진입 시: 그룹 입력 UI 초기화
+            if new_state == State.USER_CHECK and state != State.USER_CHECK:
+                USER_CHECK_UI_BUILT = False
+                user_check_counter += 1
+                current_group_input_key = f"group_input_{user_check_counter}"
+                # 기존 session_state에서 이전 그룹 입력 키들 정리
+                for k in list(st.session_state.keys()):
+                    if k.startswith("group_input_") and k != current_group_input_key:
+                        st.session_state.pop(k, None)
 
             # ENROLL로 진입 시: 초기화 및 폼 키 설정
             if new_state == State.ENROLL and state != State.ENROLL:
@@ -808,9 +815,9 @@ if run:
                 ENROLL_UI_BUILT = False
                 enroll_form_counter += 1
                 current_enroll_form_key = f"form_enroll_{enroll_form_counter}"
-                current_enroll_name_key = f"enroll_name_{enroll_form_counter}"  # ← 추가
+                current_enroll_name_key = f"enroll_name_{enroll_form_counter}"
 
-            # WELCOME로 진입 시: 타이머/녹음 플래그 초기화 + 세션 그룹 초기화
+            # WELCOME로 진입 시: 타이머/녹음 플래그 초기화 (그룹은 유지)
             if new_state == State.WELCOME:
                 sh_timer_end = time.time() + 2.0
                 VAD = False
@@ -818,50 +825,29 @@ if run:
                 VAD_TASK_RUNNING = False
                 sh_audio_file = None
                 sh_tts_file = None
-                # sh_session_group = None
+                # sh_session_group은 유지 (USER_CHECK에서 입력받았으므로)
 
-                # # 🔑 이번 방문용 고유 key 생성
-                # WELCOME_KEY_COUNTER += 1
-                # WELCOME_KEY = f"welcome_group_input_{WELCOME_KEY_COUNTER}"
-                #
-                # # 예전 welcome_group_input_* 키 제거
-                # for k in list(st.session_state.keys()):
-                #     if k.startswith("welcome_group_input_") and k != WELCOME_KEY:
-                #         st.session_state.pop(k, None)
-                #
-                # # 다음 줄은 새로 추가: 이번 방문 UI를 다시 만들 수 있게 리셋
-                # WELCOME_UI_BUILT = False
-
-            # ASR로 진입 시: ASR 비동기 초기화
+            # ASR로 진입 시: ASR 비동기 초기화 (그룹은 유지)
             if new_state == State.ASR:
                 ASR_TEXT = None
                 BYE_EXIST = False
                 ASR_TASK_STARTED = False
                 ASR_TASK_RUNNING = False
-                # 그룹은 유지 (BYE까지)
+                # sh_session_group은 유지
 
-            # BYE로 진입 시: 타이머
+            # BYE로 진입 시: 타이머 (그룹은 유지)
             if new_state == State.BYE:
                 sh_timer_end = time.time() + 2.0
+                # sh_session_group은 유지
 
-            # BYE -> IDLE로 떠날 때: 세션 그룹/키 정리
+            # BYE -> IDLE로 떠날 때: 세션 그룹 완전 제거
             if state == State.BYE and new_state == State.IDLE:
                 sh_session_group = None
-
-                # 새 키 미리 만들기
-                new_key = f"usercheck_group_input_{st.session_state.group_key_counter + 1}"
-
-                # 예전 그룹 위젯 키들 정리 (새 키는 유지)
+                # 관련 session_state 정리
                 for k in list(st.session_state.keys()):
-                    if k.startswith("usercheck_group_input_") and k != new_key:
+                    if k.startswith("group_input_"):
                         st.session_state.pop(k, None)
-
-                # 카운터+현재키 갱신
-                st.session_state.group_key_counter += 1
-                st.session_state.current_group_key = new_key
-
-                # 새 키로 입력창을 다시 만들기 위해 rerun
-                st.rerun()
+                current_group_input_key = None
 
             state = new_state
 
@@ -897,7 +883,7 @@ if run:
                     "BYE_EXIST"         : BYE_EXIST,
                     "TIMER_EXPIRED"     : TIMER_EXPIRED,
                     "current_user"      : sh_current_user,
-                    "session_group"     : sh_session_group,  # ← 세션 한정 그룹 표시 (DB 저장 안 함)
+                    "session_group"     : sh_session_group,  # ← USER_CHECK에서 입력, BYE까지 유지
                     "audio_file"        : sh_audio_file,
                     "tts_file"          : sh_tts_file,
                     "bbox_avg_n"        : BBOX_AVG_N,
