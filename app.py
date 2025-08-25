@@ -12,6 +12,11 @@ from collections import deque
 import time
 import soundfile as sf
 import uuid
+import threading
+
+# 전역(Globals & Flags 섹션) 어딘가에 추가
+REC_THREAD = None
+REC_DONE = False
 
 import ssl
 
@@ -172,6 +177,30 @@ DB_PATH = "faces_db.npy"
 SIM_THRESHOLD = 0.65
 
 
+def _record_worker(timeout: int):
+    """
+    WELCOME 단계에서 비동기로 한 번만 녹음.
+    완료되면 sh_audio_file, VAD, REC_DONE 갱신.
+    """
+    global sh_audio_file, VAD, REC_DONE
+    filename = listen_and_record_speech(timeout=timeout)  # 내부에서 VADRecorder 실행
+    sh_audio_file = filename
+    VAD = bool(filename)
+    REC_DONE = True
+
+
+def _asr_worker(path: str):
+    """
+    ASR를 백그라운드에서 실행하고 결과를 플래그에 기록.
+    """
+    global ASR_TEXT, BYE_EXIST, ASR_DONE
+    txt = asr_from_wav(path) if path else ""
+    ASR_TEXT = txt or ""
+    t = "".join(ASR_TEXT.split())
+    BYE_EXIST = ("잘가" in t) or ("bye" in t.lower())
+    ASR_DONE = True
+
+
 def load_db():
     if os.path.exists(DB_PATH):
         data = np.load(DB_PATH, allow_pickle=True).item()
@@ -299,36 +328,48 @@ def enter_enroll(key=None):
 
 
 def enter_welcome():
-    global VAD, sh_audio_file, TIMER_EXPIRED, sh_message, sh_color
+    global VAD, TIMER_EXPIRED, sh_message, sh_color, REC_THREAD, REC_DONE
 
-    update_face_detection()
+    update_face_detection()  # 카메라는 계속 읽고 있어도 됨
 
-    TIMER_EXPIRED = False
-    VAD = False
     sh_message = f"Hi, {sh_current_user}!"
     sh_color = (0, 255, 0)
 
+    # 인사 타이머가 끝나면 녹음을 시작(단, 한 번만)
     if time.time() > sh_timer_end:
         TIMER_EXPIRED = True
-        # cv2.destroyAllWindows()  # GUI 창을 쓰지 않으므로 생략
 
-        sh_audio_file = listen_and_record_speech(timeout=5)
-        if sh_audio_file:
-            VAD = True
+        # 녹음 스레드가 아직 없고, 완료도 안됐으면 시작
+        if (REC_THREAD is None or not REC_THREAD.is_alive()) and not REC_DONE:
+            REC_THREAD = threading.Thread(target=_record_worker, args=(5,), daemon=True)
+            REC_THREAD.start()
+
+        # UI 메시지: 녹음 중 안내 (루프 매 프레임 갱신)
+        if not REC_DONE:
+            sh_message = f"Listening... (up to 5s)"
+        else:
+            # 녹음 완료됨: 메시지만 바꿔두고, 전이는 state_transition에서 처리
+            sh_message = "Audio captured!" if VAD else "No speech detected."
 
 
 def enter_asr():
-    global BYE_EXIST, ASR_TEXT
+    global ASR_THREAD, ASR_DONE, sh_message, sh_color
 
+    # 카메라/얼굴 검출은 계속 돈다 (UI 오버레이를 위해 필요)
     update_face_detection()
 
-    text = asr_from_wav(sh_audio_file)
-    ASR_TEXT = text
-    text = "".join(text.split())
-    if "잘가" in text or "bye" in text.lower():
-        BYE_EXIST = True
+    # 최초 진입 시 스레드 시작
+    if (ASR_THREAD is None or not ASR_THREAD.is_alive()) and not ASR_DONE and sh_audio_file:
+        ASR_THREAD = threading.Thread(target=_asr_worker, args=(sh_audio_file,), daemon=True)
+        ASR_THREAD.start()
+
+    # UI 메시지
+    if not ASR_DONE:
+        sh_message = "Transcribing..."
+        sh_color = (0, 255, 255)
     else:
-        BYE_EXIST = False
+        sh_message = "ASR done"
+        sh_color = (0, 200, 0)
 
 
 def enter_bye():
@@ -367,12 +408,14 @@ def state_transition(current_state: State) -> State:
         return State.IDLE if not FACE_DETECTED else State.ENROLL
 
     elif current_state == State.WELCOME:
-        if TIMER_EXPIRED:
+        if TIMER_EXPIRED and REC_DONE:
             return State.ASR if VAD else State.IDLE
         return State.WELCOME
 
     elif current_state == State.ASR:
-        return State.BYE if BYE_EXIST else State.IDLE
+        if ASR_DONE:
+            return State.BYE if BYE_EXIST else State.IDLE
+        return State.ASR
 
     elif current_state == State.BYE:
         return State.IDLE if TIMER_EXPIRED else State.BYE
@@ -583,13 +626,15 @@ if run:
         # ASR UI
         if current_state == State.ASR:
             with asr_slot.container():
-                st.info("음성 인식 결과")
+                if not ASR_DONE:
+                    st.info("Transcribing...")  # 진행중
+                else:
+                    st.success("ASR Completed")
+                    if ASR_TEXT:
+                        st.write(ASR_TEXT)
+                    st.write(f"**BYE detected:** {'Yes' if BYE_EXIST else 'No'}")
                 if sh_audio_file:
                     audio_slot.audio(sh_audio_file)
-                    st.write("녹음 파일 재생 가능")
-                if ASR_TEXT:
-                    st.write(f"**인식된 텍스트:** {ASR_TEXT}")
-                st.write(f"**BYE detected:** {'Yes' if BYE_EXIST else 'No'}")
 
         # BYE UI
         if current_state == State.BYE:
@@ -628,36 +673,43 @@ if run:
             if state == State.ENROLL and new_state != State.ENROLL:
                 st.session_state.enroll_form_key = None
 
+            if new_state == State.WELCOME:
+                sh_timer_end = time.time() + 2.0  # 2초 인사
+                VAD = False
+                REC_DONE = False
+                REC_THREAD = None
+
+            if new_state == State.ASR:
+                ASR_DONE = False
+                BYE_EXIST = False
+                ASR_THREAD = None
+                ASR_TEXT = ""
+
+            if new_state == State.BYE:
+                sh_timer_end = time.time() + 2.0
+
             state = new_state
-            if state == State.WELCOME:
-                sh_timer_end = time.time() + 2.0
-            elif state == State.BYE:
-                sh_timer_end = time.time() + 2.0
 
         # Update state panel
         render_state_panel(state)
 
-        # ── 영상 그리기/표시 (ASR이 아닐 때만 표시)
-        if state != State.ASR and sh_frame is not None:
-            display_frame = sh_frame.copy()
+        # ── 영상 그리기/표시 (항상 표시: ASR 포함)
+        display_frame = sh_frame.copy()
 
-            if sh_bbox:
-                x, y, w, h = sh_bbox
-                cv2.rectangle(display_frame, (x, y), (x + w, y + h), sh_color, 2)
-                cv2.putText(display_frame, sh_message, (x, y - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, sh_color, 2)
-            else:
-                cv2.putText(display_frame, sh_message, (10, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, sh_color, 2)
-
-            frame_rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
-            h0, w0, _ = frame_rgb.shape
-            new_h = int(h0 * (width / w0))
-            frame_rgb = cv2.resize(frame_rgb, (int(width), new_h))
-            frame_slot.image(frame_rgb, channels="RGB", caption="Live", use_container_width=True)
+        if sh_bbox:
+            x, y, w, h = sh_bbox
+            cv2.rectangle(display_frame, (x, y), (x + w, y + h), sh_color, 2)
+            cv2.putText(display_frame, sh_message, (x, y - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, sh_color, 2)
         else:
-            # ASR 단계: 카메라는 계속 읽지만, UI에는 표시하지 않음
-            frame_slot.empty()
+            cv2.putText(display_frame, sh_message, (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, sh_color, 2)
+
+        frame_rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
+        h0, w0, _ = frame_rgb.shape
+        new_h = int(h0 * (width / w0))
+        frame_rgb = cv2.resize(frame_rgb, (int(width), new_h))
+        frame_slot.image(frame_rgb, channels="RGB", caption="Live", use_container_width=True)
 
         # Debug info
         with debug_slot:
