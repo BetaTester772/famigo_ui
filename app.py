@@ -87,7 +87,7 @@ class VADRecorder:
         if len(segment) / self.SAMPLE_RATE < self.MIN_DURATION:
             print("Segment too short, skipping save.")
             return
-        filename = f"speech_{time.strftime('%Y%m%d_%H%M%S')}.wav"
+        filename = f"audio/speech_{time.strftime('%Y%m%d_%H%M%S')}.wav"
         sf.write(filename, segment, self.SAMPLE_RATE)
         print(f"Audio saved: {filename}")
         self.saved_filename = filename
