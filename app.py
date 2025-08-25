@@ -12,6 +12,8 @@ from collections import deque
 import time
 import soundfile as sf
 
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
 
 # =========================
 # VAD Recorder
@@ -222,7 +224,7 @@ def update_face_detection():
 
 import whisper
 
-whisper_model = whisper.load_model("base")
+whisper_model = whisper.load_model("large-v3")
 
 
 def asr_from_wav(file_path: str) -> str:
