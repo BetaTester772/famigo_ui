@@ -11,9 +11,12 @@ import sounddevice as sd
 from collections import deque
 import time
 import soundfile as sf
+import uuid
 
 import ssl
+
 ssl._create_default_https_context = ssl._create_unverified_context
+
 
 # =========================
 # VAD Recorder
@@ -33,7 +36,7 @@ class VADRecorder:
         # Settings
         self.SAMPLE_RATE = 16000
         self.BUFFER_SIZE = self.SAMPLE_RATE * 60  # 1 minute buffer
-        self.THRESHOLD = 0.65
+        self.THRESHOLD = 0.5  # TODO: fit to environment
         self.MIN_DURATION = 0.5
         self.MARGIN = 1
         self.SILENCE_TIME = 0.6
@@ -148,6 +151,7 @@ ENROLL_SUCCESS = False
 VAD = False
 BYE_EXIST = False
 TIMER_EXPIRED = False  # WELCOME, BYE state's timer
+ASR_TEXT = ""
 
 # Shared between states
 sh_face_crop = None
@@ -287,10 +291,10 @@ def enter_enroll(key=None):
             sh_message = f"{len(results.detections)} faces detected. Only one please."
             sh_color = (0, 0, 255)
         else:
-            sh_message = "등록을 위해 얼굴을 카메라에 비춰주세요."
+            sh_message = "Please show your face to the camera for enrollment."
             sh_color = (255, 255, 0)
     else:
-        sh_message = "알 수 없는 사용자입니다. 오른쪽 패널의 폼으로 등록하세요."
+        sh_message = "Unknown user. Use the right panel to enroll."
         sh_color = (0, 255, 255)
 
 
@@ -314,11 +318,12 @@ def enter_welcome():
 
 
 def enter_asr():
-    global BYE_EXIST
+    global BYE_EXIST, ASR_TEXT
 
     update_face_detection()
 
     text = asr_from_wav(sh_audio_file)
+    ASR_TEXT = text
     text = "".join(text.split())
     if "잘가" in text or "bye" in text.lower():
         BYE_EXIST = True
@@ -441,6 +446,9 @@ with col_ui:
 if "cap" not in st.session_state:
     st.session_state.cap = None
 
+if "enroll_form_key" not in st.session_state:
+    st.session_state.enroll_form_key = None
+
 
 def open_camera(index: int, target_w: int):
     cap = cv2.VideoCapture(index)
@@ -521,34 +529,48 @@ if run:
         with message_slot.container():
             st.markdown(f"**Message:** {sh_message}")
 
-        # ENROLL UI (form created once)
+        # ENROLL UI (form created once, with unique key)
         if current_state == State.ENROLL:
+            # ENROLL에 들어올 때마다 고유한 폼 키를 1회 생성
+            if st.session_state.enroll_form_key is None:
+                st.session_state.enroll_form_key = f"form_enroll_{uuid.uuid4().hex}"
+                # 폼이 새로 만들어질 것이므로, 표시용 face placeholder도 새로 받음
+                ENROLL_UI_BUILT = False
+                enroll_face_ph = None
+
             if not ENROLL_UI_BUILT:
                 ENROLL_UI_BUILT = True
                 with enroll_slot.container():
                     st.info("알 수 없는 사용자입니다. 아래 폼으로 등록을 진행하세요.")
                     enroll_face_ph = st.empty()
 
-                    with st.form(key="form_enroll", clear_on_submit=False):
-                        new_name = st.text_input("이름", key="enroll_name")
-                        new_group = st.text_input("그룹(선택)", key="enroll_group")
+                    form_key = st.session_state.enroll_form_key
+                    # 입력 위젯 키도 폼 키에 종속시켜 중복 방지
+                    with st.form(key=form_key, clear_on_submit=False):
+                        new_name = st.text_input("이름", key=f"{form_key}_name")
+                        new_group = st.text_input("그룹(선택)", key=f"{form_key}_group")
                         submitted = st.form_submit_button("등록하기", use_container_width=True)
                     if submitted:
                         ui_enroll_submit(new_name, new_group)
+                        # 등록 직후에는 바로 전이되므로(UI상) 폼 키 정리(안전)
+                        st.session_state.enroll_form_key = None
 
-            # Update face preview
+            # 얼굴 미리보기는 계속 갱신
             if enroll_face_ph is not None:
                 if sh_face_crop is not None and sh_face_crop.size != 0:
                     face_rgb = cv2.cvtColor(sh_face_crop, cv2.COLOR_BGR2RGB)
                     enroll_face_ph.image(face_rgb, caption="등록할 얼굴", use_container_width=True)
                 else:
                     enroll_face_ph.warning("얼굴이 감지되지 않았습니다. 카메라를 향해 한 명만 비춰주세요.")
+
         else:
-            # Leaving ENROLL -> reset UI so it can be rebuilt on next entry
+            # ENROLL이 아니면 폼 리소스 정리 (다음 ENROLL 때 새 키/폼 생성)
             if ENROLL_UI_BUILT:
                 ENROLL_UI_BUILT = False
                 enroll_face_ph = None
-                enroll_slot.empty()
+            enroll_slot.empty()
+            # 혹시 남아있는 폼 키가 있으면 제거
+            st.session_state.enroll_form_key = None
 
         # WELCOME UI
         if current_state == State.WELCOME:
@@ -565,6 +587,8 @@ if run:
                 if sh_audio_file:
                     audio_slot.audio(sh_audio_file)
                     st.write("녹음 파일 재생 가능")
+                if ASR_TEXT:
+                    st.write(f"**인식된 텍스트:** {ASR_TEXT}")
                 st.write(f"**BYE detected:** {'Yes' if BYE_EXIST else 'No'}")
 
         # BYE UI
@@ -592,37 +616,48 @@ if run:
 
         if new_state != state:
             print(f"State Change: {state.name} -> {new_state.name}")
+
+            # ENROLL '진입' 시 한 번만 초기화
             if new_state == State.ENROLL:
                 ENROLL_SUCCESS = False
-                USER_EXIST = False  # 안전하게 초기화 (선택)
+                USER_EXIST = False
+                # 이전 폼 키가 남아있으면 지움 (안전)
+                st.session_state.enroll_form_key = None
+
+            # ENROLL '이탈' 시 폼 키 제거 (중복 방지)
+            if state == State.ENROLL and new_state != State.ENROLL:
+                st.session_state.enroll_form_key = None
 
             state = new_state
             if state == State.WELCOME:
-                sh_timer_end = time.time() + 2.0  # greeting 2s
+                sh_timer_end = time.time() + 2.0
             elif state == State.BYE:
-                sh_timer_end = time.time() + 2.0  # bye 2s
+                sh_timer_end = time.time() + 2.0
 
         # Update state panel
         render_state_panel(state)
 
-        # Draw overlays
-        display_frame = sh_frame.copy()
+        # ── 영상 그리기/표시 (ASR이 아닐 때만 표시)
+        if state != State.ASR and sh_frame is not None:
+            display_frame = sh_frame.copy()
 
-        if sh_bbox:
-            x, y, w, h = sh_bbox
-            cv2.rectangle(display_frame, (x, y), (x + w, y + h), sh_color, 2)
-            cv2.putText(display_frame, sh_message, (x, y - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, sh_color, 2)
+            if sh_bbox:
+                x, y, w, h = sh_bbox
+                cv2.rectangle(display_frame, (x, y), (x + w, y + h), sh_color, 2)
+                cv2.putText(display_frame, sh_message, (x, y - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, sh_color, 2)
+            else:
+                cv2.putText(display_frame, sh_message, (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, sh_color, 2)
+
+            frame_rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
+            h0, w0, _ = frame_rgb.shape
+            new_h = int(h0 * (width / w0))
+            frame_rgb = cv2.resize(frame_rgb, (int(width), new_h))
+            frame_slot.image(frame_rgb, channels="RGB", caption="Live", use_container_width=True)
         else:
-            cv2.putText(display_frame, sh_message, (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, sh_color, 2)
-
-        # Show frame
-        frame_rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
-        h0, w0, _ = frame_rgb.shape
-        new_h = int(h0 * (width / w0))
-        frame_rgb = cv2.resize(frame_rgb, (int(width), new_h))
-        frame_slot.image(frame_rgb, channels="RGB", caption="Live", use_container_width=True)
+            # ASR 단계: 카메라는 계속 읽지만, UI에는 표시하지 않음
+            frame_slot.empty()
 
         # Debug info
         with debug_slot:
