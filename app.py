@@ -16,7 +16,7 @@ import mediapipe as mp
 import streamlit as st
 from facenet_pytorch import InceptionResnetV1
 from playsound3 import playsound
-import gc  # ← 추가
+import gc
 
 cv2.setNumThreads(1)  # ← 선택: OpenCV 내부 스레드 과다 사용 억제
 
@@ -293,26 +293,24 @@ def update_face_detection():
     if _bbox_history.maxlen != BBOX_AVG_N:
         _bbox_history = deque(list(_bbox_history), maxlen=BBOX_AVG_N)
 
-    image = sh_frame
+    image = sh_frame  # 불필요한 copy() 삭제
     rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     results = face_detection.process(rgb_image)
 
     ih, iw, _ = image.shape
+    det_count = len(results.detections) if (results and results.detections) else 0
 
-    if results.detections and len(results.detections) == 1:
+    if det_count == 1:
         FACE_DETECTED = True
         det = results.detections[0]
         bboxC = det.location_data.relative_bounding_box
-        x = int(bboxC.xmin * iw)
+        x = int(bboxC.xmin * iw);
         y = int(bboxC.ymin * ih)
-        w = int(bboxC.width * iw)
+        w = int(bboxC.width * iw);
         h = int(bboxC.height * ih)
         x, y, w, h = _clip_bbox(x, y, w, h, iw, ih)
 
-        # push raw bbox -> history
         _bbox_history.append((x, y, w, h))
-
-        # average bbox
         xs = np.mean([b[0] for b in _bbox_history])
         ys = np.mean([b[1] for b in _bbox_history])
         ws = np.mean([b[2] for b in _bbox_history])
@@ -320,7 +318,7 @@ def update_face_detection():
         xa, ya, wa, ha = _clip_bbox(int(xs), int(ys), int(ws), int(hs), iw, ih)
 
         sh_bbox = (xa, ya, wa, ha)
-        # ❗ ROI는 copy()로 분리해서 큰 프레임 버퍼 참조 끊기
+        # ROI는 copy()로 분리해 상위 프레임 버퍼 참조 끊기
         sh_face_crop = image[ya:ya + ha, xa:xa + wa].copy()
         if sh_face_crop.size == 0:
             FACE_DETECTED = False
@@ -333,9 +331,9 @@ def update_face_detection():
         sh_bbox = None
         sh_face_crop = None
 
-    # 중간 버퍼/오브젝트는 즉시 해제 힌트
+    # 무거운 중간 객체 즉시 해제 힌트
     del rgb_image, results
-    return None
+    return det_count
 
 
 # =========================
@@ -382,10 +380,10 @@ def synthesize_tts_kokoro(text: str) -> str | None:
 # =========================
 def enter_idle():
     global sh_message, sh_color
-    results = update_face_detection()
+    det_count = update_face_detection()
     if not FACE_DETECTED:
-        if results.detections and len(results.detections) > 1:
-            sh_message = f"{len(results.detections)} faces detected. Only one please."
+        if det_count > 1:
+            sh_message = f"{det_count} faces detected. Only one please."
             sh_color = (0, 0, 255)
         else:
             sh_message = "Waiting for user..."
@@ -413,14 +411,15 @@ def enter_user_check():
         USER_EXIST = False
         sh_message = "Unknown user. Use the right panel to enroll."
         sh_color = (0, 255, 255)
+    gc.collect()
 
 
 def enter_enroll(key=None):
     global sh_message, sh_color
-    results = update_face_detection()
+    det_count = update_face_detection()
     if not FACE_DETECTED:
-        if results.detections and len(results.detections) > 1:
-            sh_message = f"{len(results.detections)} faces detected. Only one please."
+        if det_count > 1:
+            sh_message = f"{det_count} faces detected. Only one please."
             sh_color = (0, 0, 255)
         else:
             sh_message = "등록을 위해 얼굴을 카메라에 비춰주세요."
