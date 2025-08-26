@@ -691,11 +691,13 @@ def render_state_panel(current_state: State):
     if current_state != State.BYE:
         bye_slot.empty()
 
+    message_slot.empty()
     with message_slot.container():
         st.markdown(f"**Message:** {sh_message}")
 
     # ---------- USER_CHECK ----------
     if current_state == State.USER_CHECK:
+        usercheck_slot.empty()
         with usercheck_slot.container():
             st.info("사용자 확인 중입니다. 위의 ‘그룹명’ 입력창에 입력하세요. (BYE 전까지 유지)")
 
@@ -730,6 +732,7 @@ def render_state_panel(current_state: State):
 
     # ---------- WELCOME ----------
     if current_state == State.WELCOME:
+        welcome_slot.empty()
         with welcome_slot.container():
             if sh_session_group:
                 st.caption(f"(세션 그룹: {sh_session_group})")
@@ -747,6 +750,7 @@ def render_state_panel(current_state: State):
 
     # ---------- ASR ----------
     if current_state == State.ASR:
+        asr_slot.empty()
         with asr_slot.container():
             if ASR_TASK_RUNNING:
                 st.info("🧠 Whisper로 음성을 변환 중...")
@@ -760,6 +764,7 @@ def render_state_panel(current_state: State):
 
     # ---------- BYE ----------
     if current_state == State.BYE:
+        bye_slot.empty()
         with bye_slot.container():
             st.warning(f"Bye, **{sh_current_user}**!")
             if sh_session_group:
@@ -871,7 +876,7 @@ if run:
         render_state_panel(state)
 
         # draw overlays
-        display_frame = sh_frame.copy()
+        display_frame = sh_frame
         if sh_bbox:
             x, y, w, h = sh_bbox
             cv2.rectangle(display_frame, (x, y), (x + w, y + h), sh_color, 2)
