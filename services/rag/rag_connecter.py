@@ -18,7 +18,41 @@ from services.rag.llm_client import complete as llm_complete
 logger = logging.getLogger(__name__)
 
 _retriever = PastQueryRAGRetriever(get_embedder())
+import subprocess
+import os
+from pathlib import Path
+import ctypes
 
+def phi35_chat(user_input, sys_prompt):
+    os.chdir(Path("C:/Users/Qualcomm/workspace/famigo/phi/genie_bundle"))
+    # sys_prompt = "You are a helpful assistant. Be helpful but brief."
+    prompt = f"<|system|>{sys_prompt}<|end|><|user|>{user_input}<|end|><|assistant|>"
+
+    try:
+        result = subprocess.run(
+            ["./genie-t2t-run.exe", "-c", "genie_config.json", "-p", prompt],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+
+        if result.returncode == 0:
+            output = result.stdout
+            if "[BEGIN]:" in output and "[END]" in output:
+                start = output.find("[BEGIN]:") + 8
+                end = output.find("[END]")
+                response = output[start:end].strip()
+                return response
+            return "응답 파싱 실패"
+        else:
+            return f"실행 오류: {result.stderr}"
+
+    except subprocess.TimeoutExpired:
+        return "응답 시간 초과"
+    except Exception as e:
+        return f"오류: {e}"
+    finally:
+        os.chdir("C:\\Users\Qualcomm\workspace\\famigo\\famigo_ui\\")
 
 def _resolve_texts_by_ref(db: Session, refs: List[str]) -> Dict[str, str]:
     if not refs:
@@ -80,7 +114,8 @@ def get_rag_response(
     prompt = user  # we send system+user separately below
 
     # 5) call LLM
-    answer = llm_complete(model_name, prompt, system=system, max_tokens=600) #TODO: on-device-llm(sLM)으로 교체 예정
+    # answer = llm_complete(model_name, prompt, system=system, max_tokens=600) #TODO: on-device-llm(sLM)으로 교체 예정
+    answer  = phi35_chat(prompt, system)
 
     # 6) optionally save current query (default group)
     if save_query and query.strip():

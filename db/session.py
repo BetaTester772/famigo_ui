@@ -38,7 +38,7 @@ def _sanitize_url(url: str) -> str:
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql+psycopg://postgres:postgres@localhost:5432/postgres",
+    "postgresql+psycopg://postgres:root@localhost:5432/voice_face_rag",
 )
 ECHO = _bool_env("DB_ECHO", False)
 POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "5"))

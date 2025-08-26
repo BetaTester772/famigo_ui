@@ -14,7 +14,10 @@ try:
     from llama_index.core.vector_stores.types import (
         VectorStore, VectorStoreQuery, VectorStoreQueryResult,
     )
-    from llama_index.core.schema import BaseNode
+    from llama_index.core.vector_stores import (
+        MetadataFilter, MetadataFilters, FilterOperator, FilterCondition
+    )
+    from llama_index.core.schema import BaseNode, TextNode
 except Exception as e:  # pragma: no cover
     raise RuntimeError(
         "This module requires llama-index >= 0.10. Install it first (`pip install llama-index`)."
@@ -61,7 +64,6 @@ class PgVectorEmbeddingsStore(VectorStore):
                     visibility=VisibilityLevel(visibility),
                     text_ref=text_ref,
                     vector=emb,                           # pgvector
-                    content=getattr(node, "text", None),  # store original text
                 )
                 db.add(row)
                 db.flush()
@@ -85,15 +87,49 @@ class PgVectorEmbeddingsStore(VectorStore):
     # ------------------------------ internals -----------------------------
 
     def _parse_filters(self, q: "VectorStoreQuery") -> _FilterSpec:
+        """공식(filters) 우선, 레거시(metadata_filters) 보조."""
         spec = _FilterSpec()
-        md = (q.metadata_filters or {})
+
+        # 1) 공식 MetadataFilters
+        lf: Optional[MetadataFilters] = getattr(q, "filters", None)
+        if lf and getattr(lf, "filters", None):
+            for f in lf.filters:
+                key = getattr(f, "key", None)
+                op = getattr(f, "operator", None)
+                val = getattr(f, "value", None)
+
+                if key == "owner_id":
+                    if op == FilterOperator.IN:
+                        spec.owner_id_in = list(val) if isinstance(val, (list, tuple, set)) else [val]
+                    elif op == FilterOperator.NIN:
+                        # 우리 스펙은 단일 exclude_owner_id만 지원 → 리스트면 첫 값만 사용
+                        if isinstance(val, (list, tuple, set)):
+                            if val:
+                                spec.exclude_owner_id = int(next(iter(val)))
+                        elif val is not None:
+                            spec.exclude_owner_id = int(val)
+
+                elif key == "visibility":
+                    if op == FilterOperator.IN:
+                        spec.visibility_in = list(val) if isinstance(val, (list, tuple, set)) else [val]
+
+                elif key == "text_ref":
+                    # 접두사 매칭: TEXT_MATCH → LIKE 'prefix%'
+                    if op == FilterOperator.TEXT_MATCH and isinstance(val, str):
+                        # 사용자가 'prefix%'로 넘긴 경우 그대로, 아니면 접두사로 간주
+                        spec.text_ref_prefix = val[:-1] if val.endswith("%") else val
+
+        # 2) 레거시 metadata_filters (점진 이행)
+        md = getattr(q, "metadata_filters", None)
         if isinstance(md, dict):
-            spec.me = md.get("owner_id_me")
-            spec.include_self = bool(md.get("include_self", True))
-            spec.visibility_in = md.get("visibility_in")
-            spec.text_ref_prefix = md.get("text_ref_prefix")
-            spec.owner_id_in = md.get("owner_id_in")
-            spec.exclude_owner_id = md.get("exclude_owner_id")
+            # me/include_self는 공식 필터에 동등 키가 없어 유지
+            spec.me = md.get("owner_id_me", spec.me)
+            spec.include_self = bool(md.get("include_self", spec.include_self))
+            spec.visibility_in = md.get("visibility_in", spec.visibility_in)
+            spec.text_ref_prefix = md.get("text_ref_prefix", spec.text_ref_prefix)
+            spec.owner_id_in = md.get("owner_id_in", spec.owner_id_in)
+            spec.exclude_owner_id = md.get("exclude_owner_id", spec.exclude_owner_id)
+
         return spec
 
     def query(self, query: "VectorStoreQuery", **kwargs: Any) -> "VectorStoreQueryResult":
@@ -139,16 +175,27 @@ class PgVectorEmbeddingsStore(VectorStore):
 
         ids: List[str] = []
         sims: List[float] = []
-        metas: List[dict[str, Any]] = []
+        nodes: List[BaseNode] = []
+
         for r in rows:
             ids.append(str(r.id))
-            # cosine distance d ~ [0, 2]; we convert to similarity ~ [0,1]
+            # cosine distance d ∈ [0,2] → similarity = max(0, 1 - d) ∈ [0,1]
             sim = max(0.0, 1.0 - float(r.dist))
             sims.append(sim)
-            metas.append({"owner_id": int(r.owner_id), "visibility": str(r.visibility), "text_ref": r.text_ref})
+
+            meta = {
+                "owner_id": int(r.owner_id),
+                "visibility": r.visibility.value if hasattr(r.visibility, "value") else str(r.visibility),
+                "text_ref": r.text_ref,
+            }
+            text = r.content or r.text_ref or ""
+            # node id로 text_ref를 사용하면 상위 계층에서 dedup에 유리
+            node = TextNode(text=text, id_=r.text_ref, metadata=meta)
+            nodes.append(node)
 
         logger.info("[adapter.query] rows=%s top_k=%s", len(ids), top_k)
-        return VectorStoreQueryResult(ids=ids, similarities=sims, metadatas=metas)
+        # 공식: metadatas 대신 nodes를 반환
+        return VectorStoreQueryResult(ids=ids, similarities=sims, nodes=nodes)
 
     @classmethod
     def for_queries_only(cls, session_factory: Callable[[], Session]) -> "PgVectorEmbeddingsStore":

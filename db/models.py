@@ -52,9 +52,6 @@ class User(Base):
     __tablename__ = "users"
 
     user_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    face_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), default=uuid.uuid4, unique=True, nullable=False
-    )
 
     name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
 

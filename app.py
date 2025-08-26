@@ -18,6 +18,21 @@ from facenet_pytorch import InceptionResnetV1
 from playsound3 import playsound
 import gc
 
+from services.rag.conversation_summarizer import summarize_and_store
+from services.rag.rag_connecter import get_rag_response
+
+from sqlalchemy.orm import Session
+from db.session import SessionLocal
+from db.models import User
+
+
+def get_user_id_by_name(name: str) -> int | None:
+    """주어진 name에 해당하는 user_id 반환 (없으면 None)"""
+    with SessionLocal() as session:
+        user = session.query(User).filter(User.name == name).first()
+        return user.user_id if user else None
+
+
 cv2.setNumThreads(1)  # ← 선택: OpenCV 내부 스레드 과다 사용 억제
 
 # ===== paths / dirs =====
@@ -49,9 +64,9 @@ def get_facenet_model():
 @st.cache_resource
 def get_silero_vad_bundle():
     model, utils = torch.hub.load(
-            repo_or_dir='snakers4/silero-vad',
-            model='silero_vad',
-            trust_repo=True
+        repo_or_dir='snakers4/silero-vad',
+        model='silero_vad',
+        trust_repo=True
     )
     return model, utils
 
@@ -87,10 +102,10 @@ class VADRecorder:
 
         self.SAMPLE_RATE = 16000
         self.BUFFER_SIZE = self.SAMPLE_RATE * 60  # 1 minute buffer
-        self.THRESHOLD = 0.65
+        self.THRESHOLD = 0.6
         self.MIN_DURATION = 0.5
         self.MARGIN = 1
-        self.SILENCE_TIME = 0.6
+        self.SILENCE_TIME = 1
 
         self.reset_state()
 
@@ -214,6 +229,8 @@ VAD_TASK_RUNNING = False
 ASR_TASK_STARTED = False
 ASR_TASK_RUNNING = False
 ASR_TEXT = None
+
+sh_transcript = []
 
 # DB / threshold
 DB_PATH = "faces_db.npy"
@@ -500,10 +517,25 @@ def start_asr_async(file_path: str):
             print("[ASR] ", text)
             t = "".join(text.split()).lower()
             BYE_EXIST = ("잘가" in t) or ("bye" in t)
+            if BYE_EXIST:
+                print("[ASR] BYE detected in ASR result.")
+                tts_text = build_tts_reply_text(ASR_TEXT, sh_current_user)
+                sh_tts_file = synthesize_tts_kokoro(tts_text)
+            else:
+                # TODO: RAG 연결
+                answer = get_rag_response(
+                    user_id=get_user_id_by_name(SESSION_USER),  # TODO: int type. dict로 중간 변환
+                    query=str(ASR_TEXT),  # TODO: 쿼리
+                    target="team",
+                    group_name=sh_session_group,  # 얼굴 인식으로 받은 그룹명 TODO: str type
+                )
 
-            # TTS 생성
-            tts_text = build_tts_reply_text(ASR_TEXT, sh_current_user)
-            sh_tts_file = synthesize_tts_kokoro(tts_text)
+                sh_transcript.append({"role": "user", "content": ASR_TEXT})
+                sh_transcript.append({"role": "assistant", "content": answer})
+
+                # TTS 생성
+                tts_text = build_tts_reply_text(answer, sh_current_user)
+                sh_tts_file = synthesize_tts_kokoro(tts_text)
         finally:
             ASR_TASK_RUNNING = False
 
@@ -556,7 +588,13 @@ def state_transition(current_state: State) -> State:
         return State.ASR
 
     elif current_state == State.BYE:
-        return State.IDLE if TIMER_EXPIRED else State.BYE
+        if TIMER_EXPIRED:
+            # TODO 대화 요약 저장
+            res = summarize_and_store(me_id=get_user_id_by_name(SESSION_USER), messages=sh_transcript, visibility="group")
+            print(f"(conversation saved) text_ref={res['text_ref']} id={res['embedding_id']}")
+            return State.IDLE
+
+        return State.BYE
 
     return current_state
 
@@ -582,15 +620,15 @@ def call_state_fn(state: State, key):
 print("Loading models (cached)...")
 resnet = get_facenet_model()
 face_detection = get_face_detector()
-whisper_model = get_whisper_model("medium.en")
+whisper_model = get_whisper_model("base.en")
 
 # 여기서 미리 로드하고, 전역으로 들고만 있음 (스레드에서 새로 부르지 않음)
 vad_model, vad_utils = get_silero_vad_bundle()
 kokoro_pipeline = get_kokoro_pipeline()
 
 preprocess = transforms.Compose([
-        transforms.Resize((160, 160)), transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    transforms.Resize((160, 160)), transforms.ToTensor(),
+    transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
 ])
 name_list, embeddings = load_db()
 print("Models loaded (using cache).")
@@ -641,10 +679,10 @@ with group_ui.container():
     _gval = (st.session_state.get(_gkey, "") or "").strip()
 
     st.text_input(
-            "그룹명 (BYE 후에만 다시 입력)",
-            key=_gkey,  # ← 현재 키만 사용
-            placeholder="예: slpr",
-            disabled=bool(_gval),  # 값이 있으면 잠금
+        "그룹명 (BYE 후에만 다시 입력)",
+        key=_gkey,  # ← 현재 키만 사용
+        placeholder="예: slpr",
+        disabled=bool(_gval),  # 값이 있으면 잠금
     )
     st.caption(f"현재 그룹: {_gval or '-'}")
 
@@ -947,33 +985,33 @@ if run:
         frame_rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
 
         frame_slot.image(
-                frame_rgb,
-                channels="RGB",
-                caption="Live",
-                use_container_width=True,
-                output_format="JPEG",
+            frame_rgb,
+            channels="RGB",
+            caption="Live",
+            use_container_width=True,
+            output_format="JPEG",
         )
         del resized, frame_rgb, display_frame
 
         # debug info
         debug_ph.json({
-                "FACE_DETECTED"     : FACE_DETECTED,
-                "USER_EXIST"        : USER_EXIST,
-                "ENROLL_SUCCESS"    : ENROLL_SUCCESS,
-                "VAD"               : VAD,
-                "VAD_TASK_RUNNING"  : VAD_TASK_RUNNING,
-                "ASR_TASK_RUNNING"  : ASR_TASK_RUNNING,
-                "BYE_EXIST"         : BYE_EXIST,
-                "TIMER_EXPIRED"     : TIMER_EXPIRED,
-                "current_user"      : sh_current_user,
-                "session_group"     : sh_session_group,  # ← 세션 한정 그룹 표시 (DB 저장 안 함)
-                "audio_file"        : sh_audio_file,
-                "tts_file"          : sh_tts_file,
-                "bbox_avg_n"        : BBOX_AVG_N,
-                "len(_bbox_history)": len(_bbox_history),
-                "id(whisper_model)" : id(whisper_model),
-                "id(resnet)"        : id(resnet),
-                "id(face_detection)": id(face_detection),
+            "FACE_DETECTED": FACE_DETECTED,
+            "USER_EXIST": USER_EXIST,
+            "ENROLL_SUCCESS": ENROLL_SUCCESS,
+            "VAD": VAD,
+            "VAD_TASK_RUNNING": VAD_TASK_RUNNING,
+            "ASR_TASK_RUNNING": ASR_TASK_RUNNING,
+            "BYE_EXIST": BYE_EXIST,
+            "TIMER_EXPIRED": TIMER_EXPIRED,
+            "current_user": sh_current_user,
+            "session_group": sh_session_group,  # ← 세션 한정 그룹 표시 (DB 저장 안 함)
+            "audio_file": sh_audio_file,
+            "tts_file": sh_tts_file,
+            "bbox_avg_n": BBOX_AVG_N,
+            "len(_bbox_history)": len(_bbox_history),
+            "id(whisper_model)": id(whisper_model),
+            "id(resnet)": id(resnet),
+            "id(face_detection)": id(face_detection),
         })
 
         if frame_i % 30 == 0:
