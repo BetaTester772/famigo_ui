@@ -16,6 +16,9 @@ import mediapipe as mp
 import streamlit as st
 from facenet_pytorch import InceptionResnetV1
 from playsound3 import playsound
+import gc  # ← 추가
+
+cv2.setNumThreads(1)  # ← 선택: OpenCV 내부 스레드 과다 사용 억제
 
 # ===== paths / dirs =====
 ssl._create_default_https_context = ssl._create_unverified_context  # torch.hub SSL 회피
@@ -248,6 +251,7 @@ def find_match(embedding, name_list, embeddings):
     else:
         return None, sims[max_idx]
 
+
 def detect_user_change():
     """세션 중 사용자 변경 감지: SESSION_USER와 현재 프레임의 매칭 결과가 다르면 True"""
     global USER_SWITCHED, sh_message, sh_color
@@ -272,6 +276,7 @@ def detect_user_change():
         sh_message = f"User changed → {match_name}. Ending session..."
         sh_color = (255, 0, 0)
 
+
 def _clip_bbox(x, y, w, h, iw, ih):
     x = max(0, min(x, iw - 1))
     y = max(0, min(y, ih - 1))
@@ -284,11 +289,11 @@ def _clip_bbox(x, y, w, h, iw, ih):
 def update_face_detection():
     global FACE_DETECTED, sh_face_crop, sh_bbox, sh_frame, _bbox_history, BBOX_AVG_N
 
-    # deque maxlen 동적 반영
+    # deque maxlen 동기화
     if _bbox_history.maxlen != BBOX_AVG_N:
         _bbox_history = deque(list(_bbox_history), maxlen=BBOX_AVG_N)
 
-    image = sh_frame.copy()
+    image = sh_frame
     rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     results = face_detection.process(rgb_image)
 
@@ -315,7 +320,8 @@ def update_face_detection():
         xa, ya, wa, ha = _clip_bbox(int(xs), int(ys), int(ws), int(hs), iw, ih)
 
         sh_bbox = (xa, ya, wa, ha)
-        sh_face_crop = image[ya:ya + ha, xa:xa + wa]
+        # ❗ ROI는 copy()로 분리해서 큰 프레임 버퍼 참조 끊기
+        sh_face_crop = image[ya:ya + ha, xa:xa + wa].copy()
         if sh_face_crop.size == 0:
             FACE_DETECTED = False
             _bbox_history.clear()
@@ -326,7 +332,10 @@ def update_face_detection():
         _bbox_history.clear()
         sh_bbox = None
         sh_face_crop = None
-    return results
+
+    # 중간 버퍼/오브젝트는 즉시 해제 힌트
+    del rgb_image, results
+    return None
 
 
 # =========================
@@ -727,9 +736,7 @@ def render_state_panel(current_state: State):
     if current_state != State.BYE:
         bye_slot.empty()
 
-    message_slot.empty()
-    with message_slot.container():
-        st.markdown(f"**Message:** {sh_message}")
+    message_slot.markdown(f"**Message:** {sh_message}")
 
     # ---------- USER_CHECK ----------
     if current_state == State.USER_CHECK:
@@ -822,8 +829,12 @@ if run:
     # initial state
     state = State.IDLE
 
+    frame_i = 0
     # main loop
     while run:
+        t0 = time.time()
+        frame_i += 1
+
         # update bbox smoothing window
         BBOX_AVG_N = int(bbox_avg_n_ui)  # globally referenced in update_face_detection()
 
@@ -832,7 +843,8 @@ if run:
             st.error("프레임을 읽지 못했습니다.")
             break
 
-        key = cv2.waitKey(1) & 0xFF
+        # key = cv2.waitKey(1) & 0xFF
+        key = None
 
         _gkey = st.session_state.current_group_key
         sh_session_group = (st.session_state.get(_gkey, "") or "").strip() or None
@@ -930,10 +942,19 @@ if run:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, sh_color, 2)
 
         frame_rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
-        h0, w0, _ = frame_rgb.shape
+        h0, w0, _ = display_frame.shape
         new_h = int(h0 * (width / w0))
-        frame_rgb = cv2.resize(frame_rgb, (int(width), new_h))
-        frame_slot.image(frame_rgb, channels="RGB", caption="Live", use_container_width=True)
+        resized = cv2.resize(display_frame, (int(width), new_h))
+        frame_rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+
+        frame_slot.image(
+                frame_rgb,
+                channels="RGB",
+                caption="Live",
+                use_container_width=True,
+                output_format="JPEG",
+        )
+        del resized, frame_rgb, display_frame
 
         # debug info
         debug_ph.json({
@@ -956,12 +977,25 @@ if run:
                 "id(face_detection)": id(face_detection),
         })
 
-        time.sleep(0.01)
+        if frame_i % 30 == 0:
+            gc.collect()
+            frame_i = 0
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        # FPS 제한 (예: 30fps)
+        elapsed = time.time() - t0
+        sleep_for = max(0.0, (1 / 30) - elapsed)
+        time.sleep(sleep_for)
         run = st.session_state.get("_toggle_run", True)
 
     # cleanup
     if st.session_state.cap is not None:
         st.session_state.cap.release()
         st.session_state.cap = None
-        frame_slot.empty()
-        st.info("카메라를 종료했습니다.")
+    cv2.destroyAllWindows()
+    frame_slot.empty()
+    st.info("카메라를 종료했습니다.")
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
