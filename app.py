@@ -199,6 +199,9 @@ sh_color = (255, 255, 0)
 sh_timer_end = 0
 # sh_prev_unkown = None
 
+SESSION_USER = None
+USER_SWITCHED = False
+
 # ❗ 세션 한정 그룹명 (WELCOME~BYE 사이 메모리 보관)
 sh_session_group = None
 
@@ -245,6 +248,29 @@ def find_match(embedding, name_list, embeddings):
     else:
         return None, sims[max_idx]
 
+def detect_user_change():
+    """세션 중 사용자 변경 감지: SESSION_USER와 현재 프레임의 매칭 결과가 다르면 True"""
+    global USER_SWITCHED, sh_message, sh_color
+
+    if SESSION_USER is None:
+        return  # 아직 세션 시작 전
+
+    if sh_face_crop is None or sh_face_crop.size == 0:
+        return  # 얼굴 미검출 상태는 변경으로 보지 않음
+
+    face_pil = Image.fromarray(cv2.cvtColor(sh_face_crop, cv2.COLOR_BGR2RGB))
+    face_tensor = preprocess(face_pil).unsqueeze(0)
+    with torch.no_grad():
+        emb = resnet(face_tensor)[0].cpu().numpy()
+    emb = emb / np.linalg.norm(emb)
+
+    match_name, sim = find_match(emb, name_list, embeddings)
+
+    # 다른 "알려진" 사용자가 잡히면 변경으로 판단
+    if match_name and match_name != SESSION_USER:
+        USER_SWITCHED = True
+        sh_message = f"User changed → {match_name}. Ending session..."
+        sh_color = (255, 0, 0)
 
 def _clip_bbox(x, y, w, h, iw, ih):
     x = max(0, min(x, iw - 1))
@@ -398,6 +424,8 @@ def enter_enroll(key=None):
 def enter_welcome():
     global VAD, sh_audio_file, TIMER_EXPIRED, sh_message, sh_color
     update_face_detection()
+    detect_user_change()
+
     sh_message = f"Hi, {sh_current_user}!"
     sh_color = (0, 255, 0)
 
@@ -408,6 +436,8 @@ def enter_welcome():
 
 def enter_asr():
     update_face_detection()
+    detect_user_change()
+
     if sh_audio_file and not ASR_TASK_STARTED:
         start_asr_async(sh_audio_file)
 
@@ -496,6 +526,9 @@ def state_transition(current_state: State) -> State:
         return State.IDLE if not FACE_DETECTED else State.ENROLL
 
     elif current_state == State.WELCOME:
+        if USER_SWITCHED:
+            return State.BYE
+
         if not (time.time() > sh_timer_end):
             return State.WELCOME
         if VAD:
@@ -505,6 +538,9 @@ def state_transition(current_state: State) -> State:
         return State.IDLE
 
     elif current_state == State.ASR:
+        if USER_SWITCHED:
+            return State.BYE
+
         if ASR_TASK_RUNNING:
             return State.ASR
         if ASR_TASK_STARTED and not ASR_TASK_RUNNING:
@@ -825,6 +861,10 @@ if run:
                 VAD_TASK_RUNNING = False
                 sh_audio_file = None
                 sh_tts_file = None
+
+                SESSION_USER = sh_current_user
+                USER_SWITCHED = False
+
                 # sh_session_group = None
 
                 # # 🔑 이번 방문용 고유 key 생성
@@ -854,6 +894,9 @@ if run:
             # BYE -> IDLE로 떠날 때: 세션 그룹/키 정리
             if state == State.BYE and new_state == State.IDLE:
                 sh_session_group = None
+
+                SESSION_USER = None
+                USER_SWITCHED = False
 
                 # 새 키 미리 만들기
                 new_key = f"usercheck_group_input_{st.session_state.group_key_counter + 1}"
