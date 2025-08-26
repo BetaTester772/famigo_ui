@@ -33,7 +33,7 @@ DEFAULT_TTS_SR = 24000  # Kokoro sample rate
 # 캐시된 싱글톤 리소스 (중복 로딩 방지)
 # =========================
 @st.cache_resource
-def get_whisper_model(model_name="base.en", device=None):
+def get_whisper_model(model_name="medium.en", device=None):
     import whisper
     return whisper.load_model(model_name) if device is None else whisper.load_model(model_name, device=device)
 
@@ -538,7 +538,7 @@ def call_state_fn(state: State, key):
 print("Loading models (cached)...")
 resnet = get_facenet_model()
 face_detection = get_face_detector()
-whisper_model = get_whisper_model("base.en")
+whisper_model = get_whisper_model("medium.en")
 
 # 여기서 미리 로드하고, 전역으로 들고만 있음 (스레드에서 새로 부르지 않음)
 vad_model, vad_utils = get_silero_vad_bundle()
