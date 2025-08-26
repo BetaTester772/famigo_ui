@@ -1,4 +1,6 @@
 .idea
+audio
+faces_db.npy
 
 ### Python template
 # Byte-compiled / optimized / DLL files
