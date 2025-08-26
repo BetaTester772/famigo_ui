@@ -307,7 +307,7 @@ def update_face_detection():
 # Whisper ASR (cached)
 # =========================
 def asr_from_wav(file_path: str) -> str:
-    result = whisper_model.transcribe(file_path)
+    result = whisper_model.transcribe(file_path, language='en', fp16=False)
     return result['text']
 
 
@@ -582,6 +582,8 @@ with col_ui:
     bye_slot = st.empty()
     audio_slot = st.empty()
     debug_slot = st.expander("Debug", expanded=False)
+    with debug_slot:
+        debug_ph = st.empty()  # ← 한 칸 확보
 
 if "group_key_counter" not in st.session_state:
     st.session_state.group_key_counter = 1
@@ -886,26 +888,25 @@ if run:
         frame_slot.image(frame_rgb, channels="RGB", caption="Live", use_container_width=True)
 
         # debug info
-        with debug_slot:
-            st.write({
-                    "FACE_DETECTED"     : FACE_DETECTED,
-                    "USER_EXIST"        : USER_EXIST,
-                    "ENROLL_SUCCESS"    : ENROLL_SUCCESS,
-                    "VAD"               : VAD,
-                    "VAD_TASK_RUNNING"  : VAD_TASK_RUNNING,
-                    "ASR_TASK_RUNNING"  : ASR_TASK_RUNNING,
-                    "BYE_EXIST"         : BYE_EXIST,
-                    "TIMER_EXPIRED"     : TIMER_EXPIRED,
-                    "current_user"      : sh_current_user,
-                    "session_group"     : sh_session_group,  # ← 세션 한정 그룹 표시 (DB 저장 안 함)
-                    "audio_file"        : sh_audio_file,
-                    "tts_file"          : sh_tts_file,
-                    "bbox_avg_n"        : BBOX_AVG_N,
-                    "len(_bbox_history)": len(_bbox_history),
-                    "id(whisper_model)" : id(whisper_model),
-                    "id(resnet)"        : id(resnet),
-                    "id(face_detection)": id(face_detection),
-            })
+        debug_ph.json({
+                "FACE_DETECTED"     : FACE_DETECTED,
+                "USER_EXIST"        : USER_EXIST,
+                "ENROLL_SUCCESS"    : ENROLL_SUCCESS,
+                "VAD"               : VAD,
+                "VAD_TASK_RUNNING"  : VAD_TASK_RUNNING,
+                "ASR_TASK_RUNNING"  : ASR_TASK_RUNNING,
+                "BYE_EXIST"         : BYE_EXIST,
+                "TIMER_EXPIRED"     : TIMER_EXPIRED,
+                "current_user"      : sh_current_user,
+                "session_group"     : sh_session_group,  # ← 세션 한정 그룹 표시 (DB 저장 안 함)
+                "audio_file"        : sh_audio_file,
+                "tts_file"          : sh_tts_file,
+                "bbox_avg_n"        : BBOX_AVG_N,
+                "len(_bbox_history)": len(_bbox_history),
+                "id(whisper_model)" : id(whisper_model),
+                "id(resnet)"        : id(resnet),
+                "id(face_detection)": id(face_detection),
+        })
 
         time.sleep(0.01)
         run = st.session_state.get("_toggle_run", True)
