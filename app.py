@@ -139,10 +139,10 @@ class VADRecorder:
 
         audio_int16 = (indata * 32768).astype(np.int16).flatten()
         self.audio_buffer.extend(audio_int16)
-        if len(audio_int16) < 512:
-            return
+        # if len(audio_int16) < 512:
+            # return
 
-        audio_tensor = torch.from_numpy(audio_int16).float()
+        audio_tensor = torch.from_numpy(audio_int16).float() * 0.9
         speech_prob = self.vad_iterator.model(audio_tensor, self.SAMPLE_RATE).item()
         self.ema_speech_prob = 0.9 * self.ema_speech_prob + 0.1 * speech_prob
 
@@ -428,7 +428,7 @@ def enter_user_check():
         USER_EXIST = False
         sh_message = "Unknown user. Use the right panel to enroll."
         sh_color = (0, 255, 255)
-    gc.collect()
+    # gc.collect()
 
 
 def enter_enroll(key=None):
@@ -513,7 +513,7 @@ def start_asr_async(file_path: str):
         global ASR_TEXT, BYE_EXIST, ASR_TASK_RUNNING, sh_tts_file
         try:
             text = asr_from_wav(file_path)
-            ASR_TEXT = text
+            ASR_TEXT = text.encode("ascii", "ignore").decode("ascii").strip()
             print("[ASR] ", text)
             t = "".join(text.split()).lower()
             BYE_EXIST = ("잘가" in t) or ("bye" in t)
@@ -529,7 +529,7 @@ def start_asr_async(file_path: str):
                     target="team",
                     group_name=sh_session_group,  # 얼굴 인식으로 받은 그룹명 TODO: str type
                 )
-
+                print(answer)
                 sh_transcript.append({"role": "user", "content": ASR_TEXT})
                 sh_transcript.append({"role": "assistant", "content": answer})
 
@@ -1022,7 +1022,7 @@ if run:
 
         # FPS 제한 (예: 30fps)
         elapsed = time.time() - t0
-        sleep_for = max(0.0, (1 / 30) - elapsed)
+        sleep_for = max(0.0, (1 / 5) - elapsed)
         time.sleep(sleep_for)
         run = st.session_state.get("_toggle_run", True)
 

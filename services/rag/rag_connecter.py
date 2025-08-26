@@ -109,13 +109,16 @@ def get_rag_response(
         lines.append(f"- ({sim:.3f}) owner_id={owner_id} owner={owner_name} vis={vis} :: {content}")
 
     # 4) guarded prompt
-    me_name = owner_map.get(user_id, "사용자")
+    me_name = owner_map.get(user_id, "USER")
     system, user = build_guardrailed_prompt(user_query=query, context_lines=lines, me_name=me_name)
     prompt = user  # we send system+user separately below
+    system = system.encode('ascii', "ignore").decode('ascii')
+    prompt = prompt.encode('ascii', "ignore").decode('ascii')
 
     # 5) call LLM
     # answer = llm_complete(model_name, prompt, system=system, max_tokens=600) #TODO: on-device-llm(sLM)으로 교체 예정
-    answer  = phi35_chat(prompt, system)
+    print(prompt,system )
+    answer  = phi35_chat(prompt, system).split('\n')[0].split('.')[0]
 
     # 6) optionally save current query (default group)
     if save_query and query.strip():
