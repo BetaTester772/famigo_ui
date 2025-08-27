@@ -234,7 +234,7 @@ sh_transcript = []
 
 # DB / threshold
 DB_PATH = "faces_db.npy"
-SIM_THRESHOLD = 0.5
+SIM_THRESHOLD = 0.65
 
 # BBOX smoothing
 BBOX_AVG_N = 5
@@ -369,7 +369,7 @@ def build_tts_reply_text(asr_text: str, user: str | None) -> str:
     if "잘가" in t or "bye" in t:
         return f"Good bye, {user if user else ''}."
     # 간단 에코 응답
-    return f"{user if user else ''} said that {asr_text}"
+    return f"{asr_text}"
 
 
 def synthesize_tts_kokoro(text: str) -> str | None:
@@ -637,13 +637,13 @@ print("Models loaded (using cache).")
 # Streamlit UI & Main Loop
 # =========================
 st.set_page_config(page_title="Face Kiosk", layout="wide")
-st.title("👤 Face Kiosk with State UI")
+st.title("Famigo AI")
 
 col_video, col_ui = st.columns([3, 2], vertical_alignment="top")
 
 # Camera / Options
 with col_video:
-    st.subheader("📷 Camera")
+    st.subheader("Camera")
     cam_index = st.number_input("Camera index", min_value=0, max_value=10, value=0, step=1)
     width = st.slider("Frame width", 320, 1920, 640, step=10)
     bbox_avg_n_ui = st.slider("BBOX smoothing (frames)", 1, 30, 5, help="Average the face bbox over N frames.")
@@ -652,9 +652,9 @@ with col_video:
 
 # UI placeholders
 with col_ui:
-    st.subheader("🔖 Group")
+    st.subheader("Group")
     group_ui = st.empty()  # ← 그룹 입력 전용 placeholder
-    st.subheader("🧭 State Panel")
+    st.subheader("State Panel")
     state_badge = st.empty()
     message_slot = st.empty()
     usercheck_slot = st.empty()
@@ -719,7 +719,7 @@ welcome_progress_ph = None
 
 # Initial state
 state = State.IDLE
-st.caption("Starting state machine...")
+# st.caption("Starting state machine...")
 
 
 # ENROLL submit helper (이름만 저장)

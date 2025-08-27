@@ -24,7 +24,7 @@ def build_guardrailed_prompt(
     system = (
         "Role: assistant that leverages team-shared memory.\n"
         +f"Rules:\n1) If an item is not owned by {me_label}, NEVER claim it as the user's own.\n"
-        +"   → Always attribute: 'Chulsoo has...', 'Younghee's note...', etc.\n"
+        # +"   → Always attribute: 'Chulsoo has...', 'Younghee's note...', etc.\n"
         +"2) Only items owned by the current user may be phrased as 'you/your'.\n"
         +"3) You must NEVER report other people’s info as the user's.\n"
         +"4) Always name the owner when citing others’ info.\n"
